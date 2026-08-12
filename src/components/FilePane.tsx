@@ -96,6 +96,44 @@ function FileRow({ file, idx, pi, cols, gridCols, isActive, selected, focused, t
   )
 }
 
+/**
+ * Address-bar edit input. Focuses and selects its full text on mount, so
+ * typing immediately replaces the whole path instead of inserting into
+ * whatever position the cursor happened to land at (native `autoFocus` alone
+ * focuses the element but doesn't reliably select its text — the DOM's
+ * `value` assignment and the focus step can race, leaving the caret
+ * collapsed at the end). Doing focus+select together in an effect, after
+ * the DOM node already has its value, avoids that race.
+ */
+function AddressBarInput({ defaultValue, onSubmit, onDone }: {
+  defaultValue: string
+  onSubmit: (value: string) => void
+  onDone: () => void
+}) {
+  const ref = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.focus()
+    el.select()
+  }, [])
+
+  return (
+    <input
+      ref={ref}
+      defaultValue={defaultValue}
+      onClick={e => e.stopPropagation()}
+      onKeyDown={e => {
+        if (e.key === 'Enter') { const v = e.currentTarget.value.trim(); if (v) onSubmit(v); onDone() }
+        if (e.key === 'Escape') onDone()
+      }}
+      onBlur={onDone}
+      style={{ flex: 1, minWidth: 0, border: '1px solid var(--accent)', outline: 'none', borderRadius: 5, background: 'var(--bg-page)', color: 'var(--text)', fontSize: 11.5, padding: '3px 8px', fontFamily: 'var(--mono)' }}
+    />
+  )
+}
+
 function ColumnHeader({ pi, cols, gridCols, sortKey, sortDir }: {
   pi: number; cols: ColumnDef[]; gridCols: string; sortKey: ColumnId | null | undefined; sortDir: 1 | -1 | undefined
 }) {
@@ -358,16 +396,10 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
           style={{ display: 'flex', alignItems: 'center', height: 30, flex: '0 0 30px', padding: addressEdit === pi ? '0 7px' : '0 10px', borderBottom: '1px solid var(--border)', fontSize: 11.5, overflowX: 'auto', whiteSpace: 'nowrap' }}
         >
           {addressEdit === pi ? (
-            <input
-              autoFocus
+            <AddressBarInput
               defaultValue={joinPath(tab.path)}
-              onClick={e => e.stopPropagation()}
-              onKeyDown={e => {
-                if (e.key === 'Enter') { const v = e.currentTarget.value.trim(); if (v) void navigate(pi, splitPath(v)); endAddressEdit() }
-                if (e.key === 'Escape') endAddressEdit()
-              }}
-              onBlur={() => endAddressEdit()}
-              style={{ flex: 1, minWidth: 0, border: '1px solid var(--accent)', outline: 'none', borderRadius: 5, background: 'var(--bg-page)', color: 'var(--text)', fontSize: 11.5, padding: '3px 8px', fontFamily: 'var(--mono)' }}
+              onSubmit={v => { if (v) void navigate(pi, splitPath(v)) }}
+              onDone={endAddressEdit}
             />
           ) : (
             tab.path.map((seg, ci) => (

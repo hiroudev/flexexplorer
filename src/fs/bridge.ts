@@ -113,12 +113,18 @@ function toFileEntry(d: DirEntryDto): FileEntry {
 }
 
 // ---- path helpers (Windows-style, tolerant of forward slashes) ----
+//
+// Two absolute-path shapes are supported: drive letter ("C:\Users\dev") and
+// UNC network path ("\\server\share\folder", e.g. a file server or a
+// network-mounted storage box). For UNC paths, segs[0] is the host WITH its
+// "\\" prefix kept intact (e.g. "\\server") so join/split round-trip and
+// isRealPath can tell it apart from a plain folder name.
 
-/** Join store path segments (e.g. ['C:','Users','dev']) into an absolute path. */
+/** Join store path segments (e.g. ['C:','Users','dev'] or ['\\\\server','share','dir']) into an absolute path. */
 export function joinPath(segs: string[]): string {
   if (segs.length === 0) return ''
   const [head, ...rest] = segs
-  if (/^[A-Za-z]:$/.test(head)) {
+  if (/^[A-Za-z]:$/.test(head) || head.startsWith('\\\\')) {
     return rest.length ? head + '\\' + rest.join('\\') : head + '\\'
   }
   return segs.join('\\')
@@ -126,12 +132,18 @@ export function joinPath(segs: string[]): string {
 
 /** Split an absolute path back into store segments. */
 export function splitPath(abs: string): string[] {
-  return abs.replace(/[\\/]+$/, '').split(/[\\/]+/).filter(Boolean)
+  const s = abs.replace(/[\\/]+$/, '')
+  const unc = s.match(/^[\\/]{2}([^\\/]+)(?:[\\/](.*))?$/)
+  if (unc) {
+    const [, host, rest] = unc
+    return ['\\\\' + host, ...(rest ? rest.split(/[\\/]+/).filter(Boolean) : [])]
+  }
+  return s.split(/[\\/]+/).filter(Boolean)
 }
 
 /** True when these segments map to a real filesystem path we can read. */
 export function isRealPath(segs: string[]): boolean {
-  return segs.length > 0 && /^[A-Za-z]:$/.test(segs[0])
+  return segs.length > 0 && (/^[A-Za-z]:$/.test(segs[0]) || segs[0].startsWith('\\\\'))
 }
 
 // ---- public API ----
