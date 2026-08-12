@@ -123,8 +123,16 @@ function AddressBarInput({ defaultValue, onSubmit, onDone }: {
     <input
       ref={ref}
       defaultValue={defaultValue}
+      autoComplete="off"
+      autoCorrect="off"
+      spellCheck={false}
       onClick={e => e.stopPropagation()}
       onKeyDown={e => {
+        // Explicitly stop propagation so a global window-level keydown
+        // listener can never race this input for the same keystroke (e.g.
+        // if focus is ever ambiguous for a tick, a leaked keystroke here
+        // must not fall through to app-wide shortcuts / type-ahead).
+        e.stopPropagation()
         if (e.key === 'Enter') { const v = e.currentTarget.value.trim(); if (v) onSubmit(v); onDone() }
         if (e.key === 'Escape') onDone()
       }}
@@ -227,6 +235,7 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
   const startAddressEdit = useStore(s => s.startAddressEdit)
   const endAddressEdit = useStore(s => s.endAddressEdit)
   const navigate = useStore(s => s.navigate)
+  const openCtxBg = useStore(s => s.openCtxBg)
   const [paneDragOver, setPaneDragOver] = useState(false)
   const [tabDragOver, setTabDragOver] = useState<{ ti: number; side: 'before' | 'after' } | null>(null)
   const [tabCtx, setTabCtx] = useState<{ ti: number; x: number; y: number } | null>(null)
@@ -420,7 +429,11 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
         <ColumnHeader pi={pi} cols={cols} gridCols={gridCols} sortKey={tab.sortKey} sortDir={tab.sortDir} />
 
         {/* File list */}
-        <div ref={listRef} style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}>
+        <div
+          ref={listRef}
+          onContextMenu={e => { if (e.target === e.currentTarget) { e.preventDefault(); openCtxBg(pi, e.clientX, e.clientY) } }}
+          style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}
+        >
           {vis.map((idx, row) => (
             <FileRow
               key={tab.files[idx].name + idx}

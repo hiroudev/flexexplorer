@@ -1,6 +1,7 @@
 mod fs;
 mod icons;
 mod shell;
+mod shellnew;
 mod workspaces;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -18,14 +19,18 @@ pub fn run() {
             fs::move_entries,
             fs::delete_entries,
             fs::create_folder,
+            fs::create_new_item,
             fs::search_dir,
             icons::shell_icon,
             icons::shell_icon_for_path,
             shell::shell_verb,
             shell::create_shortcut,
+            shell::create_path_shortcut_text,
+            shell::duplicate_as_dated_copy,
             shell::reveal_in_explorer,
             shell::open_in_terminal,
             shell::open_in_vscode,
+            shell::show_shell_context_menu,
             workspaces::save_workspace,
             workspaces::list_workspaces,
             workspaces::load_workspace,

@@ -203,6 +203,20 @@ export async function createFolder(dirSegs: string[], name: string): Promise<str
   return invoke<string>('create_folder', { dir: joinPath(dirSegs), name })
 }
 
+/** Creates a new item of a well-known kind inside dirSegs ('folder' | 'txt' | 'xlsx' | 'docx' | 'pptx').
+ * Office formats are created from the same registry-registered blank template Explorer's own
+ * "New" menu uses, so this fails with a clear error rather than writing a broken 0-byte file
+ * when the corresponding Office app isn't installed. Resolves to the new item's absolute path. */
+export async function createNewItem(dirSegs: string[], kind: string): Promise<string> {
+  return invoke<string>('create_new_item', { dir: joinPath(dirSegs), kind })
+}
+
+/** Duplicates a file into the same folder as `<stem>_<YYYYMMDD>_<NN><ext>`.
+ * Resolves to the new file's path. */
+export async function duplicateAsDatedCopy(absPath: string): Promise<string> {
+  return invoke<string>('duplicate_as_dated_copy', { path: absPath })
+}
+
 export async function searchDir(rootSegs: string[], query: string, max = 500): Promise<FileEntry[]> {
   const hits = await invoke<SearchHitDto[]>('search_dir', { root: joinPath(rootSegs), query, max })
   return hits.map(h => {
@@ -229,8 +243,23 @@ export async function shellVerb(absPath: string, verb: string): Promise<void> {
   await invoke('shell_verb', { path: absPath, verb })
 }
 
+/** Pops the real OS shell context menu for absPath at screen position (x, y) —
+ * the same menu Explorer shows, including third-party shell extensions
+ * (Box, OneDrive, 7-Zip, "Send to", …) that FlexExplorer's own menu can't
+ * reasonably reimplement itself. */
+export async function showShellContextMenu(absPath: string, x: number, y: number): Promise<void> {
+  await invoke('show_shell_context_menu', { path: absPath, x: Math.round(x), y: Math.round(y) })
+}
+
 export async function createShortcut(absPath: string): Promise<string> {
   return invoke<string>('create_shortcut', { target: absPath })
+}
+
+/** Creates a `<name>へのショートカット.txt` next to absPath, containing its path as
+ * plain text — a fallback for items (e.g. some cloud-sync folders) that a real
+ * .lnk shortcut can't reliably point at. Resolves to the new file's path. */
+export async function createPathShortcutText(absPath: string): Promise<string> {
+  return invoke<string>('create_path_shortcut_text', { target: absPath })
 }
 
 export async function revealInExplorer(absPath: string): Promise<void> {

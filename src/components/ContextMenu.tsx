@@ -14,6 +14,18 @@ const SUB_ITEMS = [
   { icon: '⤴', iconColor: 'var(--text-muted)', label: '共有…' },
 ]
 
+// "新規" submenu, shown when right-clicking empty list space. Office items are
+// built from Explorer's own registered blank templates (see the Rust
+// `shellnew` module) rather than an empty file — a 0-byte .xlsx/.docx/.pptx
+// isn't valid and the app would just refuse to open it.
+const NEW_ITEMS: { icon: string; iconColor: string; label: string; kind: string }[] = [
+  { icon: '📁', iconColor: 'var(--text-muted)', label: 'フォルダー', kind: 'folder' },
+  { icon: '📄', iconColor: 'var(--text-muted)', label: 'テキスト ドキュメント', kind: 'txt' },
+  { icon: '📊', iconColor: '#2F8F5B', label: 'Excel ワークシート', kind: 'xlsx' },
+  { icon: '📝', iconColor: '#2E6FD8', label: 'Word 文書', kind: 'docx' },
+  { icon: '📽', iconColor: '#C0473E', label: 'PowerPoint プレゼンテーション', kind: 'pptx' },
+]
+
 export default function ContextMenu() {
   const ctx = useStore(s => s.ctx)
   const closeCtx = useStore(s => s.closeCtx)
@@ -38,11 +50,16 @@ export default function ContextMenu() {
   const openInTerminal = useStore(s => s.openInTerminal)
   const openInVscode = useStore(s => s.openInVscode)
   const createShortcutForSel = useStore(s => s.createShortcutForSel)
+  const createPathShortcutTextForSel = useStore(s => s.createPathShortcutTextForSel)
+  const showOsContextMenuForSel = useStore(s => s.showOsContextMenuForSel)
+  const createNewItem = useStore(s => s.createNewItem)
+  const duplicateSelectedAsDatedCopy = useStore(s => s.duplicateSelectedAsDatedCopy)
 
   if (!ctx) return null
 
   const { x, y, pi, idx, q, sub } = ctx
   const tab = panes[pi].tabs[panes[pi].active]
+  const isBg = idx === -1
   const f = tab.files[idx]
   const selCount = tab.sel.length
   const multi = selCount > 1
@@ -64,32 +81,50 @@ export default function ContextMenu() {
   type MenuItem = { divider: true } | { divider?: false; icon: string; iconColor: string; label: string; key: string; arrow?: boolean; danger?: boolean; onClick: () => void }
 
   const items: MenuItem[] = []
-  if (multi) {
-    items.push({ icon: '⇆', iconColor: 'var(--accent)', label: '一括リネーム…', key: 'Ctrl+Shift+R', onClick: () => { closeCtx(); openModal('rename') } })
+  if (isBg) {
+    // Empty list space: no target file, so only folder-level actions apply.
+    items.push({ icon: '✚', iconColor: 'var(--accent)', label: '新規', key: '', arrow: true, onClick: () => useStore.setState(s => s.ctx ? { ctx: { ...s.ctx!, sub: !s.ctx!.sub } } : {}) })
     items.push({ divider: true })
+    items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); if (clip) void paste() } })
+    items.push({ divider: true })
+    items.push({ icon: '★', iconColor: '#B7791F', label: 'ブックマークに追加', key: '', onClick: () => { closeCtx(); addBookmark() } })
+  } else {
+    if (multi) {
+      items.push({ icon: '⇆', iconColor: 'var(--accent)', label: '一括リネーム…', key: 'Ctrl+Shift+R', onClick: () => { closeCtx(); openModal('rename') } })
+      items.push({ divider: true })
+    }
+    items.push({ icon: '▸', iconColor: 'var(--text-muted)', label: '開く', key: 'Enter', onClick: () => { closeCtx(); openFile(pi, idx) } })
+    if (f?.folder) items.push({ icon: '＋', iconColor: 'var(--text-muted)', label: '新しいタブで開く', key: 'Space', onClick: () => { closeCtx(); openFolderTab(pi, f.name) } })
+    else {
+      items.push({ icon: '＋', iconColor: 'var(--text-muted)', label: 'Inspector で表示', key: 'Space', onClick: () => { closeCtx(); setInspector() } })
+      items.push({ icon: '▤', iconColor: 'var(--text-muted)', label: 'プログラムから開く…', key: '', onClick: () => { closeCtx(); openWith() } })
+    }
+    if (f?.folder) items.push({ icon: '▶', iconColor: 'var(--text-muted)', label: 'ターミナルで開く', key: '', onClick: () => { closeCtx(); openInTerminal() } })
+    items.push({ divider: true })
+    items.push({ icon: '✂', iconColor: 'var(--text-muted)', label: '切り取り', key: 'Ctrl+X', onClick: () => { closeCtx(); cutToClip() } })
+    items.push({ icon: '⎘', iconColor: 'var(--text-muted)', label: 'コピー', key: 'Ctrl+C', onClick: () => { closeCtx(); copyToClip() } })
+    items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); if (clip) void paste() } })
+    items.push({ icon: '⧉', iconColor: 'var(--text-muted)', label: 'パスをコピー', key: 'Ctrl+Shift+C', onClick: () => { closeCtx(); void copyPathToClipboard() } })
+    if (!multi && f && !f.folder) {
+      items.push({ icon: '🕓', iconColor: 'var(--text-muted)', label: 'コピーを日付付きで保存', key: '', onClick: () => { closeCtx(); void duplicateSelectedAsDatedCopy() } })
+    }
+    items.push({ divider: true })
+    items.push({ icon: '🔗', iconColor: 'var(--text-muted)', label: 'ショートカットの作成', key: '', onClick: () => { closeCtx(); void createShortcutForSel() } })
+    if (!multi && f?.folder) {
+      items.push({ icon: '📝', iconColor: 'var(--text-muted)', label: 'ショートカットを作成 (テキスト)', key: '', onClick: () => { closeCtx(); void createPathShortcutTextForSel() } })
+    }
+    items.push({ icon: '✎', iconColor: 'var(--text-muted)', label: '名前の変更', key: 'F2', onClick: () => { closeCtx(); openModal('rename') } })
+    items.push({ icon: '🗑', iconColor: 'var(--danger)', label: '削除', key: 'Del', danger: true, onClick: () => { closeCtx(); void deleteSelected() } })
+    items.push({ divider: true })
+    items.push({ icon: '◳', iconColor: 'var(--text-muted)', label: 'エクスプローラーで表示', key: '', onClick: () => { closeCtx(); revealInExplorer() } })
+    if (!multi) {
+      items.push({ icon: '⊞', iconColor: 'var(--text-muted)', label: 'Windows のメニューを表示…', key: '', onClick: () => { const cx = x, cy = y; closeCtx(); void showOsContextMenuForSel(cx, cy) } })
+    }
+    items.push({ icon: '★', iconColor: '#B7791F', label: 'ブックマークに追加', key: '', onClick: () => { closeCtx(); addBookmark() } })
+    items.push({ icon: '⋯', iconColor: 'var(--text-muted)', label: 'その他のアクション', key: '', arrow: true, onClick: () => useStore.setState(s => s.ctx ? { ctx: { ...s.ctx!, sub: !s.ctx!.sub } } : {}) })
+    items.push({ divider: true })
+    items.push({ icon: 'ℹ', iconColor: 'var(--text-muted)', label: 'プロパティ', key: 'Alt+Enter', onClick: () => { closeCtx(); shellProperties() } })
   }
-  items.push({ icon: '▸', iconColor: 'var(--text-muted)', label: '開く', key: 'Enter', onClick: () => { closeCtx(); openFile(pi, idx) } })
-  if (f?.folder) items.push({ icon: '＋', iconColor: 'var(--text-muted)', label: '新しいタブで開く', key: 'Space', onClick: () => { closeCtx(); openFolderTab(pi, f.name) } })
-  else {
-    items.push({ icon: '＋', iconColor: 'var(--text-muted)', label: 'Inspector で表示', key: 'Space', onClick: () => { closeCtx(); setInspector() } })
-    items.push({ icon: '▤', iconColor: 'var(--text-muted)', label: 'プログラムから開く…', key: '', onClick: () => { closeCtx(); openWith() } })
-  }
-  if (f?.folder) items.push({ icon: '▶', iconColor: 'var(--text-muted)', label: 'ターミナルで開く', key: '', onClick: () => { closeCtx(); openInTerminal() } })
-  items.push({ divider: true })
-  items.push({ icon: '✂', iconColor: 'var(--text-muted)', label: '切り取り', key: 'Ctrl+X', onClick: () => { closeCtx(); cutToClip() } })
-  items.push({ icon: '⎘', iconColor: 'var(--text-muted)', label: 'コピー', key: 'Ctrl+C', onClick: () => { closeCtx(); copyToClip() } })
-  items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); if (clip) void paste() } })
-  items.push({ icon: '⧉', iconColor: 'var(--text-muted)', label: 'パスをコピー', key: 'Ctrl+Shift+C', onClick: () => { closeCtx(); void copyPathToClipboard() } })
-  items.push({ divider: true })
-  items.push({ icon: '🔗', iconColor: 'var(--text-muted)', label: 'ショートカットの作成', key: '', onClick: () => { closeCtx(); void createShortcutForSel() } })
-  items.push({ icon: '✎', iconColor: 'var(--text-muted)', label: '名前の変更', key: 'F2', onClick: () => { closeCtx(); openModal('rename') } })
-  items.push({ icon: '🗑', iconColor: 'var(--danger)', label: '削除', key: 'Del', danger: true, onClick: () => { closeCtx(); void deleteSelected() } })
-  items.push({ divider: true })
-  items.push({ icon: '◳', iconColor: 'var(--text-muted)', label: 'エクスプローラーで表示', key: '', onClick: () => { closeCtx(); revealInExplorer() } })
-  items.push({ icon: '★', iconColor: '#B7791F', label: 'ブックマークに追加', key: '', onClick: () => { closeCtx(); addBookmark() } })
-  items.push({ icon: '⋯', iconColor: 'var(--text-muted)', label: 'その他のアクション', key: '', arrow: true, onClick: () => useStore.setState(s => s.ctx ? { ctx: { ...s.ctx!, sub: !s.ctx!.sub } } : {}) })
-  items.push({ divider: true })
-  items.push({ icon: 'ℹ', iconColor: 'var(--text-muted)', label: 'プロパティ', key: 'Alt+Enter', onClick: () => { closeCtx(); shellProperties() } })
 
   const filtered = ql ? items.filter(it => 'divider' in it && it.divider ? false : !('label' in it) ? false : (it as { label: string }).label.toLowerCase().includes(ql)) : items
   const empty = ql && filtered.filter(it => !('divider' in it) || !it.divider).length === 0
@@ -148,7 +183,17 @@ export default function ContextMenu() {
         </div>
 
         {/* submenu */}
-        {sub && !ql && (
+        {sub && !ql && isBg && (
+          <div style={{ position: 'absolute', left: W - 6, top: 40, width: 220, padding: 5, background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 9, boxShadow: '0 14px 40px var(--shadow)' }}>
+            {NEW_ITEMS.map(it => (
+              <CtxItem key={it.kind} icon={it.icon} iconColor={it.iconColor} label={it.label} shortcut="" onClick={() => {
+                closeCtx()
+                void createNewItem(it.kind)
+              }} onEnter={() => {}} />
+            ))}
+          </div>
+        )}
+        {sub && !ql && !isBg && (
           <div style={{ position: 'absolute', left: W - 6, top: 150, width: 200, padding: 5, background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 9, boxShadow: '0 14px 40px var(--shadow)' }}>
             {SUB_ITEMS.map(it => (
               <CtxItem key={it.label} icon={it.icon} iconColor={it.iconColor} label={it.label} shortcut="" onClick={() => {

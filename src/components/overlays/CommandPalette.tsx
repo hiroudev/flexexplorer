@@ -13,6 +13,8 @@ const ALL_COMMANDS = [
   { id: 'nav.up', label: '上の項目へ', cat: 'ナビゲーション', key: '↑' },
   { id: 'nav.down', label: '下の項目へ', cat: 'ナビゲーション', key: '↓' },
   { id: 'nav.parent', label: '親フォルダへ', cat: 'ナビゲーション', key: 'Alt+↑' },
+  { id: 'nav.back', label: '戻る', cat: 'ナビゲーション', key: 'Alt+←' },
+  { id: 'nav.forward', label: '進む', cat: 'ナビゲーション', key: 'Alt+→' },
   { id: 'nav.open', label: '開く / フォルダへ', cat: 'ナビゲーション', key: 'Enter' },
   { id: 'nav.newtab', label: '新しいタブ', cat: 'ナビゲーション', key: 'Ctrl+T' },
   { id: 'nav.closetab', label: 'タブを閉じる', cat: 'ナビゲーション', key: 'Ctrl+W' },
@@ -98,6 +100,8 @@ export default function CommandPalette() {
     else if (id === 'nav.newtab') s.newTab(ap)
     else if (id === 'nav.closetab') { const p = s.panes[ap]; s.closeTab(ap, p.active) }
     else if (id === 'nav.parent') s.navParent(ap)
+    else if (id === 'nav.back') s.navBack(ap)
+    else if (id === 'nav.forward') s.navForward(ap)
     else if (id === 'nav.up') s.moveSel(-1)
     else if (id === 'nav.down') s.moveSel(1)
     else if (id === 'nav.open') { const t = s.panes[ap].tabs[s.panes[ap].active]; s.openFile(ap, t.focus) }

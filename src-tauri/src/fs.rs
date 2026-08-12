@@ -255,7 +255,7 @@ pub fn rename_path(from: String, to: String) -> Result<String, String> {
 
 /// Pick a non-colliding target path by inserting " (2)", " (3)", … before the
 /// extension when the desired path already exists.
-fn unique_target(desired: &Path) -> PathBuf {
+pub(crate) fn unique_target(desired: &Path) -> PathBuf {
     if !desired.exists() {
         return desired.to_path_buf();
     }
@@ -354,6 +354,48 @@ pub fn create_folder(dir: String, name: String) -> Result<String, String> {
     let target = unique_target(&PathBuf::from(&dir).join(&name));
     std::fs::create_dir(&target).map_err(|e| e.to_string())?;
     Ok(target.to_string_lossy().to_string())
+}
+
+/// Create a new item of a well-known kind inside `dir`, mirroring what
+/// Explorer's own "New" submenu does for each type. `kind` is one of:
+/// "folder", "txt", "xlsx", "docx", "pptx". Office formats are built from
+/// the same registry-registered blank template Explorer itself uses (see
+/// `shellnew`) — we never fabricate an empty Office file ourselves, since a
+/// 0-byte .xlsx/.docx/.pptx isn't valid and the corresponding app would
+/// just refuse to open it. Returns the created absolute path.
+#[tauri::command]
+pub fn create_new_item(dir: String, kind: String) -> Result<String, String> {
+    let dir_path = PathBuf::from(&dir);
+
+    if kind == "folder" {
+        let target = unique_target(&dir_path.join("新しいフォルダー"));
+        std::fs::create_dir(&target).map_err(|e| e.to_string())?;
+        return Ok(target.to_string_lossy().to_string());
+    }
+
+    let base_name = match kind.as_str() {
+        "txt" => "新しいテキスト ドキュメント",
+        "xlsx" => "新しい Excel ワークシート",
+        "docx" => "新しい Word 文書",
+        "pptx" => "新しい PowerPoint プレゼンテーション",
+        _ => "新しいファイル",
+    };
+    let target = unique_target(&dir_path.join(format!("{base_name}.{kind}")));
+
+    if kind == "txt" {
+        std::fs::write(&target, []).map_err(|e| e.to_string())?;
+        return Ok(target.to_string_lossy().to_string());
+    }
+
+    match crate::shellnew::read_template(&kind) {
+        Some(bytes) => {
+            std::fs::write(&target, &bytes).map_err(|e| e.to_string())?;
+            Ok(target.to_string_lossy().to_string())
+        }
+        None => Err(format!(
+            "「.{kind}」の新規作成テンプレートが見つかりません(対応するアプリがインストールされていない可能性があります)"
+        )),
+    }
 }
 
 /// Recursively search `root` for entries whose name contains `query`

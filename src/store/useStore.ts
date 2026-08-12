@@ -6,8 +6,8 @@ import type { AppState, FileEntry, Pane, PaneTab, RenameRule, OptTab, ColumnId, 
 import { fmt, fmtDate, hashStr, uidFor, applyRules, visibleIndices } from '../utils/fileUtils'
 import {
   isTauri, isRealPath, listDir, listDrives, homeDir, openPath, splitPath, joinPath, renamePath,
-  copyEntries, moveEntries, deleteEntries, createFolder, searchDir, copyText,
-  shellVerb, createShortcut, revealInExplorer, openInTerminal, openInVscode,
+  copyEntries, moveEntries, deleteEntries, createFolder, createNewItem as bridgeCreateNewItem, searchDir, copyText,
+  shellVerb, showShellContextMenu, createShortcut, createPathShortcutText, revealInExplorer, openInTerminal, openInVscode, duplicateAsDatedCopy,
   saveWorkspace, listWorkspaces, loadWorkspace, deleteWorkspace,
 } from '../fs/bridge'
 
@@ -67,7 +67,7 @@ function makePane1(): Pane {
 }
 
 const SHORTCUT_GROUPS = [
-  { title: 'ナビゲーション', items: [['nav.up','上の項目へ','↑'],['nav.down','下の項目へ','↓'],['nav.parent','親フォルダへ','Alt+↑'],['nav.open','開く / フォルダへ','Enter'],['nav.newtab','新しいタブ','Ctrl+T'],['nav.closetab','タブを閉じる','Ctrl+W'],['cmd.goto','GoTo','Ctrl+G'],['view.split','ペインを切替','Ctrl+\\']] },
+  { title: 'ナビゲーション', items: [['nav.up','上の項目へ','↑'],['nav.down','下の項目へ','↓'],['nav.parent','親フォルダへ','Alt+↑'],['nav.back','戻る','Alt+←'],['nav.forward','進む','Alt+→'],['nav.open','開く / フォルダへ','Enter'],['nav.newtab','新しいタブ','Ctrl+T'],['nav.closetab','タブを閉じる','Ctrl+W'],['cmd.goto','GoTo','Ctrl+G'],['view.split','ペインを切替','Ctrl+\\']] },
   { title: '表示', items: [['view.inspector','Inspector を開閉','Space'],['cmd.palette','コマンドパレット','Ctrl+Shift+P'],['cmd.options','オプション','Ctrl+,'],['view.density','表示密度を切替','Ctrl+Shift+D'],['view.theme','テーマを切替','Ctrl+Shift+L'],['view.sidebar','サイドバーを開閉','Ctrl+B']] },
   { title: '編集', items: [['edit.copy','コピー','Ctrl+C'],['edit.cut','切り取り','Ctrl+X'],['edit.paste','貼り付け','Ctrl+V'],['edit.rename','名前の変更','F2'],['edit.bulk','一括リネーム','Ctrl+Shift+R'],['edit.delete','削除','Del'],['edit.copypath','パスをコピー','Ctrl+Shift+C']] },
   { title: '検索', items: [['find.filter','フィルタ検索','Ctrl+F'],['find.global','グローバル検索','Ctrl+Shift+F']] },
@@ -169,6 +169,8 @@ interface Actions {
   deleteSelected(): Promise<void>
   copyPathToClipboard(): Promise<void>
   createNewFolder(): Promise<void>
+  createNewItem(kind: string): Promise<void>
+  duplicateSelectedAsDatedCopy(): Promise<void>
   // bookmarks
   addBookmark(): void
   removeBookmark(path: string): void
@@ -181,6 +183,8 @@ interface Actions {
   openInTerminal(): void
   openInVscode(): void
   createShortcutForSel(): Promise<void>
+  createPathShortcutTextForSel(): Promise<void>
+  showOsContextMenuForSel(x: number, y: number): Promise<void>
   switchTab(pi: number, ti: number): void
   closeTab(pi: number, ti: number): void
   newTab(pi: number): void
@@ -229,6 +233,7 @@ interface Actions {
   dragEnd(): void
   // ctx
   openCtx(pi: number, idx: number, x: number, y: number): void
+  openCtxBg(pi: number, x: number, y: number): void
   closeCtx(): void
   ctxSearch(q: string): void
   togglePin(id: string): void
@@ -631,6 +636,31 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
   },
 
+  createNewItem: async (kind) => {
+    const s = get()
+    const pi = s.activePane
+    const t = activeTab(s)
+    if (!isTauri || !isRealPath(t.path)) { get().showToast('新規作成'); return }
+    try {
+      await bridgeCreateNewItem(t.path, kind)
+      await get().navigate(pi, t.path, { push: false })
+      get().showToast('作成しました')
+    } catch (err) { get().showToast('作成失敗: ' + String(err)) }
+  },
+
+  duplicateSelectedAsDatedCopy: async () => {
+    const s = get()
+    const pi = s.activePane
+    const t = activeTab(s)
+    const paths = selectedAbs(t)
+    if (paths.length !== 1) { get().showToast('コピーを日付付きで保存'); return }
+    try {
+      await duplicateAsDatedCopy(paths[0])
+      await get().navigate(pi, t.path, { push: false })
+      get().showToast('日付付きでコピーしました')
+    } catch (err) { get().showToast('コピー失敗: ' + String(err)) }
+  },
+
   addBookmark: () => {
     const t = activeTab(get())
     const path = joinPath(t.path)
@@ -711,6 +741,28 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       await get().navigate(pi, t.path, { push: false })
       get().showToast('ショートカットを作成しました')
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
+  },
+
+  createPathShortcutTextForSel: async () => {
+    const s = get()
+    const pi = s.activePane
+    const t = activeTab(s)
+    const abs = focusedAbs(t)
+    if (!abs) return
+    if (!isTauri || !isRealPath(t.path)) { get().showToast('ショートカットを作成(テキスト)'); return }
+    try {
+      await createPathShortcutText(abs)
+      await get().navigate(pi, t.path, { push: false })
+      get().showToast('テキストショートカットを作成しました')
+    } catch (err) { get().showToast('作成失敗: ' + String(err)) }
+  },
+
+  showOsContextMenuForSel: async (x, y) => {
+    const t = activeTab(get())
+    const abs = focusedAbs(t)
+    if (!abs || !isTauri) { get().showToast('Windows のメニュー'); return }
+    try { await showShellContextMenu(abs, x, y) }
+    catch (err) { get().showToast('メニューを表示できません: ' + String(err)) }
   },
 
   switchTab: (pi, ti) => set(s => { const panes = clonePanes(s.panes); panes[pi].active = ti; return { panes, activePane: pi } }),
@@ -1083,6 +1135,9 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (!t.sel.includes(idx)) { t.sel = [idx]; t.focus = idx }
     return { panes, activePane: pi, ctx: { x, y, pi, idx, q: '', sub: false } }
   }),
+  // Right-click on empty list space (no target file): idx: -1, current selection left untouched
+  // (matches Explorer — right-clicking blank space doesn't clear what's selected).
+  openCtxBg: (pi, x, y) => set({ activePane: pi, ctx: { x, y, pi, idx: -1, q: '', sub: false } }),
   closeCtx: () => { if (get().ctx) set({ ctx: null }) },
   ctxSearch: (q) => set(s => s.ctx ? { ctx: { ...s.ctx, q } } : {}),
   togglePin: (id) => {

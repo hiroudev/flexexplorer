@@ -1,4 +1,4 @@
-import { useEffect, useRef, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { useStore } from './store/useStore'
 import TitleBar from './components/TitleBar'
 import ToolBar from './components/ToolBar'
@@ -17,6 +17,8 @@ import GoToOverlay from './components/overlays/GoToOverlay'
 export default function App() {
   const panes = useStore(s => s.panes)
   const gridCols = useStore(s => s.gridCols)
+  const pane0Pct = useStore(s => s.pane0Pct)
+  const startSplitDrag = useStore(s => s.startSplitDrag)
   const dragMove = useStore(s => s.dragMove)
   const dragEnd = useStore(s => s.dragEnd)
   const setContainerW = useStore(s => s.setContainerW)
@@ -94,6 +96,8 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'x' || e.key === 'X')) { e.preventDefault(); useStore.getState().closePane(useStore.getState().activePane); return }
 
       if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); useStore.getState().navParent(useStore.getState().activePane); return }
+      if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); useStore.getState().navBack(useStore.getState().activePane); return }
+      if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); useStore.getState().navForward(useStore.getState().activePane); return }
       if ((e.ctrlKey || e.metaKey) && (e.key === 'l' || e.key === 'L')) { e.preventDefault(); useStore.getState().startAddressEdit(useStore.getState().activePane); return }
       if (e.key === 'ArrowDown') { e.preventDefault(); moveSel(1); return }
       if (e.key === 'ArrowUp') { e.preventDefault(); moveSel(-1); return }
@@ -156,18 +160,35 @@ export default function App() {
 
         {/* Panes + Inspector */}
         <div style={{ flex: 1, display: 'flex', minWidth: 0, overflow: 'hidden' }}>
-          {/* File panes (dynamic grid) */}
-          <div
-            ref={panesRef}
-            data-panes
-            style={{ flex: 1, display: 'grid', gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))`, gridAutoRows: 'minmax(0, 1fr)', gap: 8, padding: 8, minWidth: 0, minHeight: 0, overflow: 'hidden' }}
-          >
-            {panes.map((pane, pi) => {
-              const rem = panes.length % gridCols
-              const span = (pi === panes.length - 1 && rem !== 0) ? gridCols - rem + 1 : 1
-              return <FilePane key={pi} pane={pane} pi={pi} spanCols={span} />
-            })}
-          </div>
+          {/* File panes: a plain 2-up split gets an adjustable divider (drags pane0Pct);
+              any other layout (3+ panes, or a 2x2 grid) falls back to the equal-width CSS grid. */}
+          {panes.length === 2 && gridCols === 2 ? (
+            <div
+              ref={panesRef}
+              data-panes
+              style={{ flex: 1, display: 'flex', padding: 8, gap: 0, minWidth: 0, minHeight: 0, overflow: 'hidden' }}
+            >
+              <div style={{ width: `calc(${pane0Pct}% - 4px)`, minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
+                <FilePane key={0} pane={panes[0]} pi={0} spanCols={1} />
+              </div>
+              <PaneSplitHandle onMouseDown={e => { e.preventDefault(); startSplitDrag(e.clientX, panesRef.current?.clientWidth ?? 800) }} />
+              <div style={{ width: `calc(${100 - pane0Pct}% - 4px)`, minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
+                <FilePane key={1} pane={panes[1]} pi={1} spanCols={1} />
+              </div>
+            </div>
+          ) : (
+            <div
+              ref={panesRef}
+              data-panes
+              style={{ flex: 1, display: 'grid', gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))`, gridAutoRows: 'minmax(0, 1fr)', gap: 8, padding: 8, minWidth: 0, minHeight: 0, overflow: 'hidden' }}
+            >
+              {panes.map((pane, pi) => {
+                const rem = panes.length % gridCols
+                const span = (pi === panes.length - 1 && rem !== 0) ? gridCols - rem + 1 : 1
+                return <FilePane key={pi} pane={pane} pi={pi} spanCols={span} />
+              })}
+            </div>
+          )}
 
           <Inspector />
         </div>
@@ -183,6 +204,20 @@ export default function App() {
       <WorkspacesModal />
       <CommandPalette />
       <GoToOverlay />
+    </div>
+  )
+}
+
+function PaneSplitHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
+  const [hover, setHover] = useState(false)
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{ flex: '0 0 8px', width: 8, cursor: 'col-resize', display: 'flex', justifyContent: 'center' }}
+    >
+      <div style={{ width: 2, height: '100%', borderRadius: 1, background: hover ? 'var(--accent)' : 'transparent', transition: 'background .1s' }} />
     </div>
   )
 }

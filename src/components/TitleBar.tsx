@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, type MouseEvent } from 'react'
 import { useStore } from '../store/useStore'
 import { isTauri, winMinimize, winToggleMaximize, winClose, winStartDragging } from '../fs/bridge'
-import appIcon from '../assets/app-icon.png'
 
 function SearchBox() {
   const search = useStore(s => s.search)
@@ -163,11 +162,8 @@ export default function TitleBar() {
         background: 'var(--bg-titlebar)', borderBottom: '1px solid var(--border)',
         paddingLeft: 12, userSelect: 'none',
       }}>
-      <img src={appIcon} alt="" width={16} height={16} draggable={false} style={{ flex: '0 0 16px', objectFit: 'contain' }} />
-      <div style={{ fontSize: 12.5, fontWeight: 650, letterSpacing: '.01em', marginLeft: 9 }}><span style={{ color: 'var(--accent)' }}>Flex</span>Explorer</div>
-
       {/* Menu bar */}
-      <div onMouseDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} style={{ display: 'flex', gap: 1, marginLeft: 14, fontSize: 12, color: 'var(--text-muted)', position: 'relative' }}>
+      <div onMouseDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} style={{ display: 'flex', gap: 1, fontSize: 12, color: 'var(--text-muted)', position: 'relative' }}>
         {menus.map((m, i) => (
           <div key={m.title} style={{ position: 'relative' }}>
             <span
