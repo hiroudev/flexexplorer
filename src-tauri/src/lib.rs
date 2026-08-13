@@ -1,5 +1,6 @@
 mod fs;
 mod icons;
+mod notes;
 mod shell;
 mod shellnew;
 mod workspaces;
@@ -31,6 +32,9 @@ pub fn run() {
             shell::open_in_terminal,
             shell::open_in_vscode,
             shell::show_shell_context_menu,
+            notes::notes_load,
+            notes::notes_set,
+            notes::notes_delete,
             workspaces::save_workspace,
             workspaces::list_workspaces,
             workspaces::load_workspace,

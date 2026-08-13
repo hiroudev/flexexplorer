@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { useStore } from '../store/useStore'
+import { useStore, NOTE_MIN_H, NOTE_MAX_H } from '../store/useStore'
 import { iconOf, visibleIndices, fmt } from '../utils/fileUtils'
-import { shellIcon, peekIcon, joinPath, splitPath } from '../fs/bridge'
+import { shellIcon, peekIcon, joinPath, splitPath, noteKey, copyText } from '../fs/bridge'
 import type { Pane, FileEntry, ColumnDef, ColumnId } from '../types'
 
 /** Returns the native Windows shell icon data URL for a file, or null while loading. */
@@ -61,22 +61,91 @@ function CellContent({ col, file }: { col: ColumnDef; file: FileEntry }) {
   return null // 'name' handled inline (needs icon)
 }
 
-function FileRow({ file, idx, pi, cols, gridCols, isActive, selected, focused, tabIdx }: {
-  file: FileEntry; idx: number; pi: number; cols: ColumnDef[]; gridCols: string; isActive: boolean; selected: boolean; focused: boolean; tabIdx: number
+/**
+ * Inline rename editor, shown in place of the name cell. Selects only the
+ * basename on mount (Explorer's behaviour — the extension stays intact unless
+ * the user deliberately extends the selection).
+ */
+function RenameInput({ initial, folder }: { initial: string; folder: boolean }) {
+  const commitRename = useStore(s => s.commitRename)
+  const cancelRename = useStore(s => s.cancelRename)
+  const ref = useRef<HTMLInputElement>(null)
+  // Guards the blur handler so committing via Enter (which blurs on unmount)
+  // can't fire the same rename twice.
+  const doneRef = useRef(false)
+
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.focus()
+    const dot = initial.lastIndexOf('.')
+    if (!folder && dot > 0) el.setSelectionRange(0, dot)
+    else el.select()
+  }, [initial, folder])
+
+  const finish = (commit: boolean) => {
+    if (doneRef.current) return
+    doneRef.current = true
+    if (commit) void commitRename(ref.current?.value ?? initial)
+    else cancelRename()
+  }
+
+  return (
+    <input
+      ref={ref}
+      defaultValue={initial}
+      autoComplete="off"
+      spellCheck={false}
+      onClick={e => e.stopPropagation()}
+      onDoubleClick={e => e.stopPropagation()}
+      onMouseDown={e => e.stopPropagation()}
+      onKeyDown={e => {
+        e.stopPropagation()
+        if (e.key === 'Enter') { e.preventDefault(); finish(true) }
+        if (e.key === 'Escape') { e.preventDefault(); finish(false) }
+      }}
+      onBlur={() => finish(true)}
+      style={{ flex: 1, minWidth: 0, height: 'calc(var(--row-h) - 6px)', border: '1px solid var(--accent)', outline: 'none', borderRadius: 4, background: 'var(--bg-page)', color: 'var(--text)', fontSize: 'var(--list-fs)', fontFamily: 'var(--font)', padding: '0 5px' }}
+    />
+  )
+}
+
+function FileRow({ file, idx, pi, cols, gridCols, isActive, selected, focused, tabIdx, renaming, soleSelected }: {
+  file: FileEntry; idx: number; pi: number; cols: ColumnDef[]; gridCols: string; isActive: boolean; selected: boolean; focused: boolean; tabIdx: number; renaming: boolean; soleSelected: boolean
 }) {
   const selectFile = useStore(s => s.selectFile)
   const openFile = useStore(s => s.openFile)
   const openCtx = useStore(s => s.openCtx)
+  const startRename = useStore(s => s.startRename)
+  const singleClickOpen = useStore(s => s.adv.singleClick)
   const ic = iconOf(file)
   const shellUrl = useShellIcon(file.name, !!file.folder)
   const zebra = useStore(s => s.opt.zebra)
   const bg = selected ? (isActive ? 'var(--bg-active)' : 'var(--bg-hover)') : (zebra && tabIdx % 2 === 1 ? 'var(--bg-stripe)' : 'transparent')
 
+  // Explorer's "slow second click renames": a click on a row that is already
+  // the sole selection starts an inline rename — but only after the
+  // double-click window has passed, so opening the item still wins.
+  const renameTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const cancelPendingRename = () => {
+    if (renameTimer.current) { clearTimeout(renameTimer.current); renameTimer.current = null }
+  }
+  useEffect(() => cancelPendingRename, [])
+
+  const onClick = (e: React.MouseEvent) => {
+    const wasSole = selected && soleSelected && isActive && !e.ctrlKey && !e.shiftKey && !renaming
+    selectFile(pi, idx, e)
+    cancelPendingRename()
+    if (wasSole && !singleClickOpen) {
+      renameTimer.current = setTimeout(() => { renameTimer.current = null; startRename(pi, idx) }, 500)
+    }
+  }
+
   return (
     <div
-      onClick={e => selectFile(pi, idx, e as React.MouseEvent)}
-      onDoubleClick={() => openFile(pi, idx)}
-      onContextMenu={e => { e.preventDefault(); openCtx(pi, idx, e.clientX, e.clientY) }}
+      onClick={onClick}
+      onDoubleClick={() => { cancelPendingRename(); openFile(pi, idx) }}
+      onContextMenu={e => { e.preventDefault(); cancelPendingRename(); openCtx(pi, idx, e.clientX, e.clientY) }}
       title={file.name}
       data-focused={focused && isActive ? '1' : undefined}
       style={{ display: 'grid', gridTemplateColumns: gridCols, alignItems: 'center', height: 'var(--row-h)', padding: '0 10px', gap: 8, fontSize: 'var(--list-fs)', background: bg, color: 'var(--text)', borderBottom: '1px solid var(--col-divider)', cursor: 'default', userSelect: 'none', boxShadow: focused && isActive ? 'inset 0 0 0 1.5px var(--accent)' : 'none', borderRadius: focused && isActive ? 4 : 0 }}
@@ -87,7 +156,9 @@ function FileRow({ file, idx, pi, cols, gridCols, isActive, selected, focused, t
             {shellUrl
               ? <img src={shellUrl} alt="" draggable={false} style={{ width: 'var(--icon-box, 16px)', height: 'var(--icon-box, 16px)', flex: '0 0 var(--icon-box, 16px)', objectFit: 'contain' }} />
               : (file.folder ? <FolderIcon color={ic.color} /> : <FileIcon color={ic.color} soft={ic.soft} label={ic.label} />)}
-            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.name}</span>
+            {renaming
+              ? <RenameInput initial={file.name} folder={!!file.folder} />
+              : <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.name}</span>}
           </div>
         )
         : <CellContent key={col.id} col={col} file={file} />
@@ -213,6 +284,132 @@ function TabContextMenu({ pi, ti, x, y, pinned, onClose }: { pi: number; ti: num
   )
 }
 
+/** Right-click menu for the address bar (edit / copy / jump to a pasted path). */
+function AddressContextMenu({ pi, path, x, y, onClose }: { pi: number; path: string[]; x: number; y: number; onClose: () => void }) {
+  const startAddressEdit = useStore(s => s.startAddressEdit)
+  const navigate = useStore(s => s.navigate)
+  const showToast = useStore(s => s.showToast)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const close = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose() }
+    window.addEventListener('mousedown', close)
+    return () => window.removeEventListener('mousedown', close)
+  }, [onClose])
+
+  const Item = ({ label, shortcut, run }: { label: string; shortcut?: string; run: () => void }) => (
+    <div
+      onClick={() => { run(); onClose() }}
+      style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '7px 12px', fontSize: 12, cursor: 'default', borderRadius: 5, color: 'var(--text)' }}
+      onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
+      onMouseLeave={e => (e.currentTarget.style.background = '')}
+    >
+      <span style={{ flex: 1, whiteSpace: 'nowrap' }}>{label}</span>
+      {shortcut && <span style={{ fontFamily: 'var(--mono)', fontSize: 10.5, color: 'var(--text-faint)' }}>{shortcut}</span>}
+    </div>
+  )
+
+  return (
+    <div ref={ref} style={{ position: 'fixed', left: Math.min(x, window.innerWidth - 230), top: y, zIndex: 200, minWidth: 214, padding: 5, background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 9, boxShadow: '0 14px 40px var(--shadow)' }}>
+      <Item label="アドレスを編集" shortcut="Ctrl+L" run={() => startAddressEdit(pi)} />
+      <Item label="パスをコピー" run={() => { void copyText(joinPath(path)).then(ok => showToast(ok ? 'パスをコピーしました' : 'コピーに失敗')) }} />
+      <Item label="コピー済みのパスへ移動" run={() => {
+        void navigator.clipboard.readText()
+          .then(t => {
+            const v = t.trim().replace(/^"|"$/g, '')
+            if (v) void navigate(pi, splitPath(v))
+            else showToast('クリップボードが空です')
+          })
+          .catch(() => showToast('クリップボードを読み取れません'))
+      }} />
+    </div>
+  )
+}
+
+/**
+ * Per-folder sticky memo, pinned to the bottom of the pane. The note is stored
+ * outside the folder (see src-tauri/src/notes.rs) so it stays private to this
+ * machine even for shared or read-only folders. Height is user-draggable and
+ * persisted per folder; width simply follows the pane.
+ */
+function FolderNotePanel({ path }: { path: string[] }) {
+  const key = noteKey(path)
+  const note = useStore(s => s.notes[key])
+  const setNoteText = useStore(s => s.setNoteText)
+  const setNoteHeight = useStore(s => s.setNoteHeight)
+  const toggleNoteCollapsed = useStore(s => s.toggleNoteCollapsed)
+  const removeNote = useStore(s => s.removeNote)
+  const taRef = useRef<HTMLTextAreaElement>(null)
+  // A memo that opens empty was just created from the menu — jump straight in.
+  const autoFocus = useRef(!note?.text)
+
+  useEffect(() => {
+    if (autoFocus.current && note && !note.collapsed) { taRef.current?.focus(); autoFocus.current = false }
+  }, [note])
+
+  if (!note) return null
+
+  const onResizeDown = (e: React.MouseEvent) => {
+    e.preventDefault(); e.stopPropagation()
+    const startY = e.clientY
+    const startH = note.h
+    const move = (ev: MouseEvent) => setNoteHeight(key, startH - (ev.clientY - startY))
+    const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
+
+  const HeadBtn = ({ label, title, onClick, danger }: { label: string; title: string; onClick: () => void; danger?: boolean }) => (
+    <span
+      title={title}
+      onClick={e => { e.stopPropagation(); onClick() }}
+      style={{ width: 18, height: 18, flex: '0 0 18px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 4, fontSize: 10.5, color: 'var(--text-faint)' }}
+      onMouseEnter={e => { e.currentTarget.style.background = danger ? 'var(--danger-soft)' : 'var(--bg-hover)'; e.currentTarget.style.color = danger ? 'var(--danger)' : 'var(--text)' }}
+      onMouseLeave={e => { e.currentTarget.style.background = ''; e.currentTarget.style.color = 'var(--text-faint)' }}
+    >{label}</span>
+  )
+
+  return (
+    <div style={{ flex: '0 0 auto', borderTop: '1px solid var(--border)', background: 'var(--warn-soft)' }}>
+      {!note.collapsed && (
+        <div
+          onMouseDown={onResizeDown}
+          title="ドラッグで高さを調整"
+          style={{ height: 5, cursor: 'row-resize', background: 'transparent' }}
+        />
+      )}
+      <div
+        onClick={() => { if (note.collapsed) toggleNoteCollapsed(key) }}
+        style={{ display: 'flex', alignItems: 'center', gap: 6, height: 22, padding: '0 8px', fontSize: 11, color: 'var(--text-muted)', cursor: 'default', userSelect: 'none' }}
+      >
+        <span style={{ flex: '0 0 auto' }}>📌</span>
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
+          メモ{note.collapsed && note.text ? `: ${note.text.split('\n')[0]}` : ''}
+        </span>
+        {!note.collapsed && note.updated && <span style={{ flex: '0 0 auto', fontSize: 10, opacity: 0.7 }}>{note.updated}</span>}
+        <HeadBtn label={note.collapsed ? '▴' : '▾'} title={note.collapsed ? '展開' : '折りたたむ'} onClick={() => toggleNoteCollapsed(key)} />
+        <HeadBtn label="🗑" title="このメモを削除" onClick={() => removeNote(key)} danger />
+      </div>
+      {!note.collapsed && (
+        <textarea
+          ref={taRef}
+          value={note.text}
+          onChange={e => setNoteText(key, e.target.value)}
+          onKeyDown={e => { e.stopPropagation(); if (e.key === 'Escape') e.currentTarget.blur() }}
+          placeholder="このフォルダについてのメモ（自分だけに表示されます）"
+          spellCheck={false}
+          style={{
+            display: 'block', width: '100%', height: Math.max(NOTE_MIN_H, Math.min(NOTE_MAX_H, note.h)),
+            boxSizing: 'border-box', border: 'none', outline: 'none', resize: 'none',
+            background: 'transparent', color: 'var(--text)', fontFamily: 'var(--font)', fontSize: 12, lineHeight: 1.55,
+            padding: '0 10px 8px',
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
 export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: number; spanCols: number }) {
   const activePane = useStore(s => s.activePane)
   const paneCols = useStore(s => s.gridCols)
@@ -236,11 +433,14 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
   const endAddressEdit = useStore(s => s.endAddressEdit)
   const navigate = useStore(s => s.navigate)
   const openCtxBg = useStore(s => s.openCtxBg)
+  const renaming = useStore(s => s.renaming)
   const [paneDragOver, setPaneDragOver] = useState(false)
   const [tabDragOver, setTabDragOver] = useState<{ ti: number; side: 'before' | 'after' } | null>(null)
   const [tabCtx, setTabCtx] = useState<{ ti: number; x: number; y: number } | null>(null)
+  const [addrCtx, setAddrCtx] = useState<{ x: number; y: number } | null>(null)
 
   const isActive = pi === activePane
+  const renamingIdx = renaming && renaming.pi === pi ? renaming.idx : -1
   const tab = pane.tabs[pane.active]
   const pw = (containerW || 900) / Math.max(1, paneCols) * spanCols - 18
   const cols = visibleColumns(tab.columns, pw)
@@ -399,9 +599,14 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
           <TabContextMenu pi={pi} ti={tabCtx.ti} x={tabCtx.x} y={tabCtx.y} pinned={!!pane.tabs[tabCtx.ti]?.pinned} onClose={() => setTabCtx(null)} />
         )}
 
-        {/* Breadcrumb / address bar */}
+        {/* Breadcrumb / address bar.
+            Editing can be started four ways, so a long path never forces a trip
+            to the far right edge: click the current (last) crumb, click the
+            sticky ✎ button, right-click anywhere on the bar, or Ctrl+L / F4. */}
         <div
           onClick={() => { if (addressEdit !== pi) startAddressEdit(pi) }}
+          onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setActivePane(pi); setAddrCtx({ x: e.clientX, y: e.clientY }) }}
+          title="クリックでパスを編集（右クリックでメニュー）"
           style={{ display: 'flex', alignItems: 'center', height: 30, flex: '0 0 30px', padding: addressEdit === pi ? '0 7px' : '0 10px', borderBottom: '1px solid var(--border)', fontSize: 11.5, overflowX: 'auto', whiteSpace: 'nowrap' }}
         >
           {addressEdit === pi ? (
@@ -411,19 +616,38 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
               onDone={endAddressEdit}
             />
           ) : (
-            tab.path.map((seg, ci) => (
-              <span key={ci} style={{ display: 'flex', alignItems: 'center' }}>
-                <span
-                  onClick={e => { e.stopPropagation(); navBreadcrumb(pi, ci) }}
-                  style={{ padding: '2px 7px', borderRadius: 4, cursor: 'default', color: ci === tab.path.length - 1 ? 'var(--text)' : 'var(--text-muted)', fontWeight: ci === tab.path.length - 1 ? 600 : 400, flex: '0 0 auto' }}
-                  onMouseEnter={e => { if (ci < tab.path.length - 1) { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text)' } }}
-                  onMouseLeave={e => { e.currentTarget.style.background = ''; e.currentTarget.style.color = ci === tab.path.length - 1 ? 'var(--text)' : 'var(--text-muted)' }}
-                >{seg}</span>
-                {ci < tab.path.length - 1 && <span style={{ color: 'var(--text-faint)', padding: '0 1px', flex: '0 0 auto' }}>›</span>}
-              </span>
-            ))
+            <>
+              {tab.path.map((seg, ci) => {
+                const last = ci === tab.path.length - 1
+                return (
+                  <span key={ci} style={{ display: 'flex', alignItems: 'center' }}>
+                    <span
+                      onClick={e => { e.stopPropagation(); if (last) startAddressEdit(pi); else navBreadcrumb(pi, ci) }}
+                      title={last ? 'クリックでパスを編集' : seg + ' へ移動'}
+                      style={{ padding: '2px 7px', borderRadius: 4, cursor: 'default', color: last ? 'var(--text)' : 'var(--text-muted)', fontWeight: last ? 600 : 400, flex: '0 0 auto' }}
+                      onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text)' }}
+                      onMouseLeave={e => { e.currentTarget.style.background = ''; e.currentTarget.style.color = last ? 'var(--text)' : 'var(--text-muted)' }}
+                    >{seg}</span>
+                    {!last && <span style={{ color: 'var(--text-faint)', padding: '0 1px', flex: '0 0 auto' }}>›</span>}
+                  </span>
+                )
+              })}
+              {/* Sticks to the right edge of the bar, so it stays reachable
+                  however far the breadcrumbs scroll. */}
+              <span
+                onClick={e => { e.stopPropagation(); startAddressEdit(pi) }}
+                title="パスを編集 (Ctrl+L / F4)"
+                style={{ position: 'sticky', right: 0, marginLeft: 'auto', flex: '0 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 22, height: 20, borderRadius: 4, cursor: 'default', fontSize: 11, color: 'var(--text-faint)', background: 'var(--bg-panel)', boxShadow: '-8px 0 8px -2px var(--bg-panel)' }}
+                onMouseEnter={e => { e.currentTarget.style.color = 'var(--text)' }}
+                onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-faint)' }}
+              >✎</span>
+            </>
           )}
         </div>
+
+        {addrCtx && (
+          <AddressContextMenu pi={pi} path={tab.path} x={addrCtx.x} y={addrCtx.y} onClose={() => setAddrCtx(null)} />
+        )}
 
         {/* Column header */}
         <ColumnHeader pi={pi} cols={cols} gridCols={gridCols} sortKey={tab.sortKey} sortDir={tab.sortDir} />
@@ -446,9 +670,14 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
               selected={tab.sel.includes(idx)}
               focused={tab.focus === idx}
               tabIdx={row}
+              renaming={renamingIdx === idx}
+              soleSelected={tab.sel.length === 1}
             />
           ))}
         </div>
+
+        {/* Folder sticky memo (private, stored per folder) */}
+        <FolderNotePanel path={tab.path} />
       </div>
     </div>
   )

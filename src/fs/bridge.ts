@@ -5,7 +5,7 @@
 // false and callers fall back to the mock data baked into the store. This keeps
 // the web build fully functional with zero Tauri runtime present.
 
-import type { FileEntry } from '../types'
+import type { FileEntry, FolderNote } from '../types'
 
 export const isTauri =
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -272,6 +272,31 @@ export async function openInTerminal(dirSegs: string[]): Promise<void> {
 
 export async function openInVscode(absPath: string): Promise<void> {
   await invoke('open_in_vscode', { path: absPath })
+}
+
+// ---- per-folder sticky notes ----
+
+/** Storage key for a folder's note: case-insensitive, separator-normalized, no
+ * trailing slash (so "C:\Dir", "c:/dir\" and "C:\dir" all share one note). */
+export function noteKey(segs: string[]): string {
+  const abs = joinPath(segs).replace(/\//g, '\\')
+  const trimmed = abs.replace(/\\+$/, '')
+  return (trimmed || abs).toLowerCase()
+}
+
+export async function notesLoad(): Promise<Record<string, FolderNote>> {
+  if (!isTauri) return {}
+  return invoke<Record<string, FolderNote>>('notes_load')
+}
+
+export async function notesSet(key: string, note: FolderNote): Promise<void> {
+  if (!isTauri) return
+  await invoke('notes_set', { key, note })
+}
+
+export async function notesDelete(key: string): Promise<void> {
+  if (!isTauri) return
+  await invoke('notes_delete', { key })
 }
 
 // ---- named workspaces (layout files) ----

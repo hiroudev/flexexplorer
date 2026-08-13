@@ -94,11 +94,16 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && e.altKey && e.key === 'ArrowRight') { e.preventDefault(); useStore.getState().addPaneRight(); return }
       if ((e.ctrlKey || e.metaKey) && e.altKey && e.key === 'ArrowDown') { e.preventDefault(); useStore.getState().addPaneDown(); return }
       if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'x' || e.key === 'X')) { e.preventDefault(); useStore.getState().closePane(useStore.getState().activePane); return }
+      // Layout groups: Ctrl+←/→ steps through the toolbar's group tabs.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); useStore.getState().cycleLayoutGroup(-1); return }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === 'ArrowRight') { e.preventDefault(); useStore.getState().cycleLayoutGroup(1); return }
 
       if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); useStore.getState().navParent(useStore.getState().activePane); return }
       if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); useStore.getState().navBack(useStore.getState().activePane); return }
       if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); useStore.getState().navForward(useStore.getState().activePane); return }
       if ((e.ctrlKey || e.metaKey) && (e.key === 'l' || e.key === 'L')) { e.preventDefault(); useStore.getState().startAddressEdit(useStore.getState().activePane); return }
+      if (e.key === 'F4') { e.preventDefault(); useStore.getState().startAddressEdit(useStore.getState().activePane); return }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'm' || e.key === 'M')) { e.preventDefault(); useStore.getState().addNote(); return }
       if (e.key === 'ArrowDown') { e.preventDefault(); moveSel(1); return }
       if (e.key === 'ArrowUp') { e.preventDefault(); moveSel(-1); return }
 
@@ -112,7 +117,15 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && (e.key === 't')) { e.preventDefault(); st.newTab(ap); return }
       if ((e.ctrlKey || e.metaKey) && (e.key === 'w')) { e.preventDefault(); st.closeTab(ap, st.panes[ap].active); return }
       if (e.key === 'Delete') { e.preventDefault(); void st.deleteSelected(); return }
-      if (e.key === 'F2') { e.preventDefault(); st.openModal('rename'); return }
+      if (e.key === 'F2') {
+        e.preventDefault()
+        // A single selected item renames inline in the list; a multi-selection
+        // goes to the bulk-rename tool (F2's Explorer meaning has no bulk case).
+        const tab = st.panes[ap].tabs[st.panes[ap].active]
+        if (tab.sel.length === 1) st.startRename(ap, tab.sel[0])
+        else st.openModal('rename')
+        return
+      }
       if (e.altKey && e.key === 'Enter') { e.preventDefault(); st.shellProperties(); return }
       if (e.key === 'Enter') {
         e.preventDefault()

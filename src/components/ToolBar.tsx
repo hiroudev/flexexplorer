@@ -1,17 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { useStore } from '../store/useStore'
-import { THEMES } from 'flex-design/themes/presets.js'
 import LayoutMenu from './LayoutMenu'
 import LayoutTabs from './LayoutTabs'
-
-function SegBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
-  return (
-    <div
-      onClick={onClick}
-      style={{ padding: '4px 11px', borderRadius: 5, cursor: 'default', fontSize: 11.5, fontWeight: active ? 650 : 500, color: active ? 'var(--accent-contrast)' : 'var(--text-muted)', background: active ? 'var(--accent)' : 'transparent' }}
-    >{children}</div>
-  )
-}
 
 function IconBtn({ title, onClick, children }: { title: string; onClick: () => void; children: ReactNode }) {
   const [hover, setHover] = useState(false)
@@ -24,8 +14,6 @@ function IconBtn({ title, onClick, children }: { title: string; onClick: () => v
 }
 
 export default function ToolBar() {
-  const theme = useStore(s => s.theme)
-  const setTheme = useStore(s => s.setTheme)
   const openModal = useStore(s => s.openModal)
   const openPalette = useStore(s => s.openPalette)
   const openGoto = useStore(s => s.openGoto)
@@ -75,11 +63,8 @@ export default function ToolBar() {
       {/* Pane layout */}
       <LayoutMenu />
 
-      {/* Theme toggle (light/dark ベースの簡易切替。全テーマからの選択は オプション > 外観 で) */}
-      <div style={{ display: 'flex', background: 'var(--bg-page)', border: '1px solid var(--border)', borderRadius: 7, padding: 2, gap: 2 }}>
-        <SegBtn active={(THEMES[theme]?.base ?? 'light') === 'light'} onClick={() => setTheme('flex-light')}>ライト</SegBtn>
-        <SegBtn active={(THEMES[theme]?.base ?? 'light') === 'dark'} onClick={() => setTheme('flex-dark')}>ダーク</SegBtn>
-      </div>
+      {/* Theme selection lives in オプション > 外観 (テーマ一覧) — a separate
+          light/dark toggle here would just duplicate it. */}
 
       {/* Options btn */}
       <div

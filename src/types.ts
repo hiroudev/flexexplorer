@@ -112,6 +112,21 @@ export interface Clipboard {
   paths: string[]
 }
 
+/** A private, machine-local memo attached to one folder (stored outside the folder). */
+export interface FolderNote {
+  text: string
+  /** Panel height in px, as last dragged by the user. */
+  h: number
+  collapsed?: boolean
+  updated?: string
+}
+
+/** Inline rename in progress: which entry of which pane is being edited. */
+export interface RenameState {
+  pi: number
+  idx: number
+}
+
 export type ColumnId = 'name' | 'date' | 'size'
 
 export interface ColumnDef {
@@ -159,6 +174,9 @@ export interface AppState {
   layouts: LayoutGroup[]
   activeLayout: number
   addressEdit: number | null
+  /** Folder notes, keyed by `noteKey()` (lowercased absolute path). */
+  notes: Record<string, FolderNote>
+  renaming: RenameState | null
 }
 
 export interface IconInfo {

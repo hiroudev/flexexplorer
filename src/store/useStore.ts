@@ -2,13 +2,14 @@ import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { THEMES } from 'flex-design/themes/presets.js'
 import { applyTheme } from 'flex-design/runtime/theme.js'
-import type { AppState, FileEntry, Pane, PaneTab, RenameRule, OptTab, ColumnId, LayoutGroup } from '../types'
+import type { AppState, FileEntry, Pane, PaneTab, RenameRule, OptTab, ColumnId, LayoutGroup, FolderNote } from '../types'
 import { fmt, fmtDate, hashStr, uidFor, applyRules, visibleIndices } from '../utils/fileUtils'
 import {
   isTauri, isRealPath, listDir, listDrives, homeDir, openPath, splitPath, joinPath, renamePath,
   copyEntries, moveEntries, deleteEntries, createFolder, createNewItem as bridgeCreateNewItem, searchDir, copyText,
   shellVerb, showShellContextMenu, createShortcut, createPathShortcutText, revealInExplorer, openInTerminal, openInVscode, duplicateAsDatedCopy,
   saveWorkspace, listWorkspaces, loadWorkspace, deleteWorkspace,
+  noteKey, notesLoad, notesSet, notesDelete,
 } from '../fs/bridge'
 
 const F = (name: string, o: Partial<FileEntry> = {}): FileEntry => ({ name, ...o })
@@ -178,6 +179,7 @@ interface Actions {
   runGlobalSearch(): Promise<void>
   // native shell actions
   shellProperties(): void
+  shellNew(): void
   openWith(): void
   revealInExplorer(): void
   openInTerminal(): void
@@ -203,6 +205,7 @@ interface Actions {
   typeAhead(ch: string): void
   // layout groups (Tablacus-style tabs bundling a whole pane arrangement)
   switchLayoutGroup(i: number): void
+  cycleLayoutGroup(dir: 1 | -1): void
   addLayoutGroup(): void
   closeLayoutGroup(i: number): void
   renameLayoutGroup(i: number, name: string): void
@@ -246,6 +249,18 @@ interface Actions {
   loadNamedWorkspace(name: string): Promise<void>
   deleteNamedWorkspace(name: string): Promise<void>
   refreshWorkspaces(): Promise<void>
+  // inline rename (F2 / slow second click on a selected row)
+  startRename(pi?: number, idx?: number): void
+  cancelRename(): void
+  commitRename(name: string): Promise<void>
+  // folder sticky notes
+  loadNotes(): Promise<void>
+  /** Create (or reveal) the memo for `path`, defaulting to the active folder. */
+  addNote(path?: string[]): void
+  setNoteText(key: string, text: string): void
+  setNoteHeight(key: string, h: number): void
+  toggleNoteCollapsed(key: string): void
+  removeNote(key: string): void
   // rename
   addRule(type: RenameRule['type']): void
   removeRule(id: string): void
@@ -301,6 +316,27 @@ function pushClosedTab(t: PaneTab) {
 // Debounced session auto-save.
 let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null
 const SESSION_KEY = 'flexexplorer:session'
+
+// Folder notes: min/max panel height, and one debounce timer per folder so
+// typing in a memo doesn't rewrite notes.json on every keystroke.
+export const NOTE_MIN_H = 64
+export const NOTE_MAX_H = 520
+const noteSaveTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function saveNoteDebounced(key: string, note: FolderNote) {
+  const prev = noteSaveTimers.get(key)
+  if (prev) clearTimeout(prev)
+  noteSaveTimers.set(key, setTimeout(() => {
+    noteSaveTimers.delete(key)
+    void notesSet(key, note).catch(() => {})
+  }, 500))
+}
+
+function nowStamp(): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
 
 interface SessionTab {
   path?: string[]
@@ -393,6 +429,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   layouts: [{ id: 'g' + rid(), name: 'グループ 1', panes: [], gridCols: 2, activePane: 0 }],
   activeLayout: 0,
   addressEdit: null,
+  notes: {},
+  renaming: null,
 
   setTheme: (t) => { applyTheme(t, document.documentElement); set({ theme: t, opt: { ...get().opt, theme: t } }) },
   toggleTheme: () => {
@@ -480,7 +518,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       }
       const abs = joinPath(segs)
       const recentPaths = [abs, ...s.recentPaths.filter(rp => rp !== abs)].slice(0, 12)
-      return { panes, activePane: pi, recentPaths }
+      return { panes, activePane: pi, recentPaths, renaming: null }
     })
   },
 
@@ -550,6 +588,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       const [home, drives] = await Promise.all([homeDir(), listDrives()])
       set({ drives, home })
       void get().refreshWorkspaces()
+      void get().loadNotes()
       // Restore the previous session if enabled.
       if (get().adv.restore) {
         try {
@@ -701,6 +740,16 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     else get().showToast('プロパティ')
   },
 
+  /** Explorer's own "新規" verb on the focused file — Office apps open an
+   * unsaved copy seeded from it, leaving the original untouched. Same behaviour
+   * FlexFind exposes; no-op for types that don't register the verb. */
+  shellNew: () => {
+    const abs = focusedAbs(activeTab(get()))
+    if (!abs) return
+    if (isTauri) shellVerb(abs, 'new').catch(() => get().showToast('この種類のファイルは「新規」に対応していません'))
+    else get().showToast('新規')
+  },
+
   openWith: () => {
     const abs = focusedAbs(activeTab(get()))
     if (!abs) return
@@ -765,7 +814,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     catch (err) { get().showToast('メニューを表示できません: ' + String(err)) }
   },
 
-  switchTab: (pi, ti) => set(s => { const panes = clonePanes(s.panes); panes[pi].active = ti; return { panes, activePane: pi } }),
+  switchTab: (pi, ti) => set(s => { const panes = clonePanes(s.panes); panes[pi].active = ti; return { panes, activePane: pi, renaming: null } }),
 
   closeTab: (pi, ti) => {
     const p = get().panes[pi]
@@ -929,6 +978,14 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
         })).catch(() => {})
       }))
     }
+  },
+
+  /** Ctrl+←/→: step through layout groups, wrapping at both ends. */
+  cycleLayoutGroup: (dir) => {
+    const s = get()
+    const n = s.layouts.length
+    if (n < 2) return
+    get().switchLayoutGroup((s.activeLayout + dir + n) % n)
   },
 
   addLayoutGroup: () => {
@@ -1244,6 +1301,93 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       await get().refreshWorkspaces()
       get().showToast(`「${name}」を削除しました`)
     } catch (err) { get().showToast('削除失敗: ' + String(err)) }
+  },
+
+  startRename: (pi, idx) => {
+    const s = get()
+    const p = pi ?? s.activePane
+    const t = s.panes[p].tabs[s.panes[p].active]
+    const i = idx ?? t.focus
+    if (!t.files[i]) return
+    set({ renaming: { pi: p, idx: i }, activePane: p, ctx: null })
+  },
+
+  cancelRename: () => { if (get().renaming) set({ renaming: null }) },
+
+  commitRename: async (name) => {
+    const s = get()
+    const r = s.renaming
+    set({ renaming: null })
+    if (!r) return
+    const t = s.panes[r.pi].tabs[s.panes[r.pi].active]
+    const f = t.files[r.idx]
+    const next = name.trim()
+    if (!f || !next || next === f.name) return
+    if (/[\\/:*?"<>|]/.test(next)) { get().showToast('ファイル名に使えない文字が含まれています'); return }
+    if (!isTauri || !isRealPath(t.path)) { get().showToast(`名前を変更: ${next}`); return }
+    // Search results carry their own absolute path; plain listings live under the tab path.
+    const fromSegs = f.abs ? splitPath(f.abs) : [...t.path, f.name]
+    try {
+      await renamePath(fromSegs, next)
+      await get().navigate(r.pi, t.path, { push: false })
+      // Re-focus the entry under its new name (the listing was re-sorted by the refresh).
+      set(st => {
+        const panes = clonePanes(st.panes); const tt = panes[r.pi].tabs[panes[r.pi].active]
+        const i = tt.files.findIndex(x => x.name === next)
+        if (i >= 0) { tt.focus = i; tt.sel = [i] }
+        return { panes }
+      })
+      get().showToast(`「${next}」に変更しました`)
+    } catch (err) { get().showToast('名前の変更に失敗: ' + String(err)) }
+  },
+
+  loadNotes: async () => {
+    if (!isTauri) return
+    try { set({ notes: await notesLoad() }) } catch { /* notes are optional */ }
+  },
+
+  addNote: (path) => {
+    const s = get()
+    const segs = path ?? activeTab(s).path
+    const key = noteKey(segs)
+    const cur = s.notes[key]
+    // Already has one: just make sure it's expanded rather than starting over.
+    if (cur) { set({ ctx: null }); if (cur.collapsed) get().toggleNoteCollapsed(key); return }
+    const note: FolderNote = { text: '', h: 140, collapsed: false, updated: nowStamp() }
+    set(st => ({ notes: { ...st.notes, [key]: note }, ctx: null }))
+    void notesSet(key, note).catch(() => {})
+    // Focused by the note panel itself once it mounts (see FolderNotePanel).
+  },
+
+  setNoteText: (key, text) => {
+    const cur = get().notes[key]
+    if (!cur) return
+    const note: FolderNote = { ...cur, text, updated: nowStamp() }
+    set(s => ({ notes: { ...s.notes, [key]: note } }))
+    saveNoteDebounced(key, note)
+  },
+
+  setNoteHeight: (key, h) => {
+    const cur = get().notes[key]
+    if (!cur) return
+    const note: FolderNote = { ...cur, h: Math.max(NOTE_MIN_H, Math.min(NOTE_MAX_H, Math.round(h))) }
+    if (note.h === cur.h) return
+    set(s => ({ notes: { ...s.notes, [key]: note } }))
+    saveNoteDebounced(key, note)
+  },
+
+  toggleNoteCollapsed: (key) => {
+    const cur = get().notes[key]
+    if (!cur) return
+    const note: FolderNote = { ...cur, collapsed: !cur.collapsed }
+    set(s => ({ notes: { ...s.notes, [key]: note } }))
+    saveNoteDebounced(key, note)
+  },
+
+  removeNote: (key) => {
+    set(s => { const n = { ...s.notes }; delete n[key]; return { notes: n, ctx: null } })
+    void notesDelete(key).catch(() => {})
+    get().showToast('付箋メモを削除しました')
   },
 
   addRule: (type) => set(s => ({ rename: { ...s.rename, rules: [...s.rename.rules, ruleDefaults(type)], addOpen: false } })),

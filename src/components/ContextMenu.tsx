@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useStore } from '../store/useStore'
+import { noteKey } from '../fs/bridge'
 
 const PIN_DEFS: Record<string, { label: string; dot: string }> = {
   vscode: { label: 'VS Code で開く', dot: '#2E6FD8' },
@@ -54,6 +55,10 @@ export default function ContextMenu() {
   const showOsContextMenuForSel = useStore(s => s.showOsContextMenuForSel)
   const createNewItem = useStore(s => s.createNewItem)
   const duplicateSelectedAsDatedCopy = useStore(s => s.duplicateSelectedAsDatedCopy)
+  const startRename = useStore(s => s.startRename)
+  const shellNew = useStore(s => s.shellNew)
+  const addNote = useStore(s => s.addNote)
+  const notes = useStore(s => s.notes)
 
   if (!ctx) return null
 
@@ -78,15 +83,20 @@ export default function ContextMenu() {
     else showToast(label)
   }
 
-  type MenuItem = { divider: true } | { divider?: false; icon: string; iconColor: string; label: string; key: string; arrow?: boolean; danger?: boolean; onClick: () => void }
+  type MenuItem = { divider: true } | { divider?: false; icon: string; iconColor: string; label: string; key: string; arrow?: boolean; hoverSub?: boolean; danger?: boolean; onClick: () => void }
+
+  const hasNote = !!notes[noteKey(tab.path)]
 
   const items: MenuItem[] = []
   if (isBg) {
     // Empty list space: no target file, so only folder-level actions apply.
-    items.push({ icon: '✚', iconColor: 'var(--accent)', label: '新規', key: '', arrow: true, onClick: () => useStore.setState(s => s.ctx ? { ctx: { ...s.ctx!, sub: !s.ctx!.sub } } : {}) })
+    // The "新規" list opens on hover (no extra click) — same directness as the
+    // native menu, without going through "Windows のメニューを表示…".
+    items.push({ icon: '✚', iconColor: 'var(--accent)', label: '新規', key: '', arrow: true, hoverSub: true, onClick: () => useStore.setState(s => s.ctx ? { ctx: { ...s.ctx!, sub: !s.ctx!.sub } } : {}) })
     items.push({ divider: true })
     items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); if (clip) void paste() } })
     items.push({ divider: true })
+    items.push({ icon: '📌', iconColor: 'var(--warn)', label: hasNote ? '付箋メモを表示' : 'このフォルダに付箋メモ', key: 'Ctrl+M', onClick: () => { closeCtx(); addNote() } })
     items.push({ icon: '★', iconColor: '#B7791F', label: 'ブックマークに追加', key: '', onClick: () => { closeCtx(); addBookmark() } })
   } else {
     if (multi) {
@@ -98,8 +108,15 @@ export default function ContextMenu() {
     else {
       items.push({ icon: '＋', iconColor: 'var(--text-muted)', label: 'Inspector で表示', key: 'Space', onClick: () => { closeCtx(); setInspector() } })
       items.push({ icon: '▤', iconColor: 'var(--text-muted)', label: 'プログラムから開く…', key: '', onClick: () => { closeCtx(); openWith() } })
+      // Explorer's own "新規" verb, surfaced directly instead of only through
+      // "Windows のメニューを表示…" (Office types open an unsaved copy of this file).
+      if (!multi) items.push({ icon: '✚', iconColor: 'var(--accent)', label: '新規', key: '', onClick: () => { closeCtx(); shellNew() } })
     }
     if (f?.folder) items.push({ icon: '▶', iconColor: 'var(--text-muted)', label: 'ターミナルで開く', key: '', onClick: () => { closeCtx(); openInTerminal() } })
+    if (!multi && f?.folder) {
+      const childHasNote = !!notes[noteKey([...tab.path, f.name])]
+      items.push({ icon: '📌', iconColor: 'var(--warn)', label: childHasNote ? '付箋メモを編集' : 'このフォルダに付箋メモ', key: '', onClick: () => { closeCtx(); openFolderTab(pi, f.name); addNote([...tab.path, f.name]) } })
+    }
     items.push({ divider: true })
     items.push({ icon: '✂', iconColor: 'var(--text-muted)', label: '切り取り', key: 'Ctrl+X', onClick: () => { closeCtx(); cutToClip() } })
     items.push({ icon: '⎘', iconColor: 'var(--text-muted)', label: 'コピー', key: 'Ctrl+C', onClick: () => { closeCtx(); copyToClip() } })
@@ -113,7 +130,9 @@ export default function ContextMenu() {
     if (!multi && f?.folder) {
       items.push({ icon: '📝', iconColor: 'var(--text-muted)', label: 'ショートカットを作成 (テキスト)', key: '', onClick: () => { closeCtx(); void createPathShortcutTextForSel() } })
     }
-    items.push({ icon: '✎', iconColor: 'var(--text-muted)', label: '名前の変更', key: 'F2', onClick: () => { closeCtx(); openModal('rename') } })
+    // Single item → inline edit in the list. A multi-selection already has
+    // 一括リネーム at the top of this menu, so it isn't repeated here.
+    if (!multi) items.push({ icon: '✎', iconColor: 'var(--text-muted)', label: '名前の変更', key: 'F2', onClick: () => { closeCtx(); startRename(pi, idx) } })
     items.push({ icon: '🗑', iconColor: 'var(--danger)', label: '削除', key: 'Del', danger: true, onClick: () => { closeCtx(); void deleteSelected() } })
     items.push({ divider: true })
     items.push({ icon: '◳', iconColor: 'var(--text-muted)', label: 'エクスプローラーで表示', key: '', onClick: () => { closeCtx(); revealInExplorer() } })
@@ -163,7 +182,7 @@ export default function ContextMenu() {
         <div style={{ maxHeight: 'min(560px, calc(100vh - 90px))', overflowY: 'auto' }}>
           {filtered.map((it, i) => {
             if ('divider' in it && it.divider) return <div key={i} style={{ height: 1, background: 'var(--border)', margin: '4px 6px' }} />
-            const item = it as { icon: string; iconColor: string; label: string; key: string; arrow?: boolean; danger?: boolean; onClick: () => void }
+            const item = it as { icon: string; iconColor: string; label: string; key: string; arrow?: boolean; hoverSub?: boolean; danger?: boolean; onClick: () => void }
             return (
               <CtxItem
                 key={item.label}
@@ -175,7 +194,10 @@ export default function ContextMenu() {
                 danger={item.danger}
                 active={item.arrow && sub}
                 onClick={item.onClick}
-                onEnter={() => { if (!item.arrow && sub) useStore.setState(s => s.ctx ? { ctx: { ...s.ctx!, sub: false } } : {}) }}
+                onEnter={() => {
+                  if (item.hoverSub) { if (!sub) useStore.setState(s => s.ctx ? { ctx: { ...s.ctx!, sub: true } } : {}) }
+                  else if (!item.arrow && sub) useStore.setState(s => s.ctx ? { ctx: { ...s.ctx!, sub: false } } : {})
+                }}
               />
             )
           })}
