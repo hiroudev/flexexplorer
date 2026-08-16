@@ -91,7 +91,8 @@ export interface CtxState {
   pi: number
   idx: number
   q: string
-  sub: boolean
+  /** Which submenu is currently open, if any ('new' | 'more' | 'svn'). */
+  sub: string | null
 }
 
 export interface Drive {
@@ -177,6 +178,8 @@ export interface AppState {
   /** Folder notes, keyed by `noteKey()` (lowercased absolute path). */
   notes: Record<string, FolderNote>
   renaming: RenameState | null
+  /** Which optional external tools were detected on this machine. */
+  extTools: { tortoiseSvn: boolean; winmerge: boolean }
 }
 
 export interface IconInfo {

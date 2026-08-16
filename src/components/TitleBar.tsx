@@ -53,6 +53,7 @@ function buildMenus(): { title: string; items: MenuItem[] }[] {
         { type: 'item', label: 'ピン留め以外のタブを閉じる', run: () => s().cleanTabs(ap()) },
         { type: 'sep' },
         { type: 'item', label: 'ワークスペース…', key: 'Ctrl+Shift+S', run: () => s().openModal('workspaces') },
+        { type: 'item', label: '閉じたグループを復元', key: 'Ctrl+Shift+G', run: () => s().reopenClosedLayoutGroup() },
         { type: 'sep' },
         { type: 'item', label: '終了', danger: true, run: () => { if (isTauri) void winClose(); else s().showToast('終了') } },
       ],

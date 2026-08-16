@@ -156,6 +156,24 @@ pub fn home_dir() -> String {
     dirs_home().unwrap_or_default()
 }
 
+/// A folder to show on startup instead of the usual session restore, passed
+/// as this process's first command-line argument — e.g. a launcher (BlueWind's
+/// "フォルダを開くファイラー" setting) or FlexFind's "FlexExplorerで表示"
+/// invoking `FlexExplorer.exe "<path>"`. A file argument resolves to its
+/// containing folder; anything else is ignored.
+#[tauri::command]
+pub fn launch_path() -> Option<String> {
+    let raw = std::env::args().nth(1)?;
+    let p = Path::new(&raw);
+    if p.is_dir() {
+        Some(raw)
+    } else if p.is_file() {
+        p.parent().map(|d| d.to_string_lossy().to_string())
+    } else {
+        None
+    }
+}
+
 fn dirs_home() -> Option<String> {
     #[cfg(windows)]
     {
@@ -173,8 +191,14 @@ pub fn open_path(path: String) -> Result<(), String> {
     #[cfg(windows)]
     {
         // `cmd /C start "" "<path>"` lets the shell resolve the default app.
+        // cmd.exe is a console-subsystem process, so without CREATE_NO_WINDOW
+        // it briefly flashes an empty console window on every open — even
+        // though it exits immediately after launching the real target.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         std::process::Command::new("cmd")
             .args(["/C", "start", "", &path])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| e.to_string())?;
     }

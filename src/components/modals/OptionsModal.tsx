@@ -399,7 +399,7 @@ function AdvancedTab() {
         <Toggle value={adv.gpu} onChange={() => toggleAdv('gpu')} />
       </Row>
       <div style={{ marginTop: 24, padding: '12px 14px', borderRadius: 7, border: '1px dashed var(--border-strong)', fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-        <strong style={{ color: 'var(--text)' }}>FlexExplorer</strong> v0.1.0 — Tauri 2 / React 18
+        <strong style={{ color: 'var(--text)' }}>FlexExplorer</strong> v{__APP_VERSION__} — Tauri 2 / React 18
       </div>
     </div>
   )

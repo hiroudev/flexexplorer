@@ -5,11 +5,12 @@ import { applyTheme } from 'flex-design/runtime/theme.js'
 import type { AppState, FileEntry, Pane, PaneTab, RenameRule, OptTab, ColumnId, LayoutGroup, FolderNote } from '../types'
 import { fmt, fmtDate, hashStr, uidFor, applyRules, visibleIndices } from '../utils/fileUtils'
 import {
-  isTauri, isRealPath, listDir, listDrives, homeDir, openPath, splitPath, joinPath, renamePath,
+  isTauri, isRealPath, listDir, listDrives, homeDir, launchPath, openPath, splitPath, joinPath, renamePath,
   copyEntries, moveEntries, deleteEntries, createFolder, createNewItem as bridgeCreateNewItem, searchDir, copyText,
   shellVerb, showShellContextMenu, createShortcut, createPathShortcutText, revealInExplorer, openInTerminal, openInVscode, duplicateAsDatedCopy,
   saveWorkspace, listWorkspaces, loadWorkspace, deleteWorkspace,
   noteKey, notesLoad, notesSet, notesDelete,
+  externalToolsStatus, tortoiseSvnCommand, winmergeCompare,
 } from '../fs/bridge'
 
 const F = (name: string, o: Partial<FileEntry> = {}): FileEntry => ({ name, ...o })
@@ -208,6 +209,7 @@ interface Actions {
   cycleLayoutGroup(dir: 1 | -1): void
   addLayoutGroup(): void
   closeLayoutGroup(i: number): void
+  reopenClosedLayoutGroup(): void
   renameLayoutGroup(i: number, name: string): void
   // tabs: pin / cleanup / restore / drag-reorder / move between panes
   toggleTabPin(pi: number, ti: number): void
@@ -261,6 +263,10 @@ interface Actions {
   setNoteHeight(key: string, h: number): void
   toggleNoteCollapsed(key: string): void
   removeNote(key: string): void
+  // external tool integration (TortoiseSVN / WinMerge)
+  loadExtTools(): Promise<void>
+  runTortoiseSvn(cmd: string, paths: string[]): Promise<void>
+  runWinMerge(paths: string[]): Promise<void>
   // rename
   addRule(type: RenameRule['type']): void
   removeRule(id: string): void
@@ -312,6 +318,13 @@ const MAX_CLOSED_TABS = 20
 function pushClosedTab(t: PaneTab) {
   closedTabStack.push(t)
   if (closedTabStack.length > MAX_CLOSED_TABS) closedTabStack.shift()
+}
+// Recently-closed layout groups (whole pane/tab arrangements), for reopen.
+let closedGroupStack: LayoutGroup[] = []
+const MAX_CLOSED_GROUPS = 10
+function pushClosedLayoutGroup(g: LayoutGroup) {
+  closedGroupStack.push(g)
+  if (closedGroupStack.length > MAX_CLOSED_GROUPS) closedGroupStack.shift()
 }
 // Debounced session auto-save.
 let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null
@@ -431,6 +444,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   addressEdit: null,
   notes: {},
   renaming: null,
+  extTools: { tortoiseSvn: false, winmerge: false },
 
   setTheme: (t) => { applyTheme(t, document.documentElement); set({ theme: t, opt: { ...get().opt, theme: t } }) },
   toggleTheme: () => {
@@ -589,6 +603,23 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       set({ drives, home })
       void get().refreshWorkspaces()
       void get().loadNotes()
+      void get().loadExtTools()
+
+      // Launched with a folder argument — an external launcher (BlueWind's
+      // "フォルダを開くファイラー" pointed at this exe) or FlexFind's
+      // "FlexExplorerで表示" invoking `FlexExplorer.exe "<path>"`. Show that
+      // folder immediately; this is an explicit navigation request, so it
+      // takes priority over restoring whatever was open last session.
+      const startPath = await launchPath()
+      if (startPath) {
+        const segs = splitPath(startPath)
+        await get().navigate(0, segs, { push: false })
+        const root = drives[0]?.path ? splitPath(drives[0].path) : ['C:']
+        await get().navigate(1, root, { push: false })
+        set({ activePane: 0 })
+        return
+      }
+
       // Restore the previous session if enabled.
       if (get().adv.restore) {
         try {
@@ -1016,6 +1047,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     let layouts = s.layouts.map((g, gi) => gi === s.activeLayout
       ? { ...g, panes: clonePanes(s.panes), gridCols: s.gridCols, activePane: s.activePane }
       : g)
+    const closing = layouts[i]
+    // Closing a group discards its whole pane/tab arrangement, so confirm
+    // first — same weight as closing a window, unlike a single tab.
+    if (!window.confirm(`グループ「${closing.name}」を閉じますか？`)) return
+    pushClosedLayoutGroup(closing)
     const wasActive = i === s.activeLayout
     layouts = layouts.filter((_, gi) => gi !== i)
     const activeLayout = i < s.activeLayout ? s.activeLayout - 1 : Math.min(i, layouts.length - 1)
@@ -1038,6 +1074,38 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
         })).catch(() => {})
       }))
     }
+    get().showToast(`グループ「${closing.name}」を閉じました`, closing.name)
+  },
+
+  /** Restore the most recently closed layout group, tab-close-style. */
+  reopenClosedLayoutGroup: () => {
+    const g = closedGroupStack.pop()
+    if (!g) { get().showToast('復元するグループがありません'); return }
+    const s = get()
+    const layouts = s.layouts.map((lg, gi) => gi === s.activeLayout
+      ? { ...lg, panes: clonePanes(s.panes), gridCols: s.gridCols, activePane: s.activePane }
+      : lg)
+    const restored: LayoutGroup = { ...g, id: 'g' + rid(), panes: clonePanes(g.panes) }
+    const next = [...layouts, restored]
+    set({
+      layouts: next,
+      activeLayout: next.length - 1,
+      panes: clonePanes(restored.panes),
+      gridCols: restored.gridCols,
+      activePane: Math.min(restored.activePane, Math.max(0, restored.panes.length - 1)),
+    })
+    if (isTauri) {
+      const cur = get().panes
+      cur.forEach((p, pi) => p.tabs.forEach((t, ti) => {
+        if (!isRealPath(t.path)) return
+        listDir(t.path).then(files => set(st => {
+          const ps = clonePanes(st.panes)
+          if (ps[pi]?.tabs[ti]?.id === t.id) { ps[pi].tabs[ti].files = files; ps[pi].tabs[ti].sel = files.length ? [0] : [] }
+          return { panes: ps }
+        })).catch(() => {})
+      }))
+    }
+    get().showToast(`グループ「${restored.name}」を復元しました`)
   },
 
   renameLayoutGroup: (i, name) => set(s => {
@@ -1190,11 +1258,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   openCtx: (pi, idx, x, y) => set(s => {
     const panes = clonePanes(s.panes); const t = panes[pi].tabs[panes[pi].active]
     if (!t.sel.includes(idx)) { t.sel = [idx]; t.focus = idx }
-    return { panes, activePane: pi, ctx: { x, y, pi, idx, q: '', sub: false } }
+    return { panes, activePane: pi, ctx: { x, y, pi, idx, q: '', sub: null } }
   }),
   // Right-click on empty list space (no target file): idx: -1, current selection left untouched
   // (matches Explorer — right-clicking blank space doesn't clear what's selected).
-  openCtxBg: (pi, x, y) => set({ activePane: pi, ctx: { x, y, pi, idx: -1, q: '', sub: false } }),
+  openCtxBg: (pi, x, y) => set({ activePane: pi, ctx: { x, y, pi, idx: -1, q: '', sub: null } }),
   closeCtx: () => { if (get().ctx) set({ ctx: null }) },
   ctxSearch: (q) => set(s => s.ctx ? { ctx: { ...s.ctx, q } } : {}),
   togglePin: (id) => {
@@ -1388,6 +1456,25 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     set(s => { const n = { ...s.notes }; delete n[key]; return { notes: n, ctx: null } })
     void notesDelete(key).catch(() => {})
     get().showToast('付箋メモを削除しました')
+  },
+
+  loadExtTools: async () => {
+    if (!isTauri) return
+    try { set({ extTools: await externalToolsStatus() }) } catch { /* keep both flags false */ }
+  },
+
+  runTortoiseSvn: async (cmd, paths) => {
+    if (!paths.length) return
+    if (!isTauri) { get().showToast('TortoiseSVN: ' + cmd); return }
+    try { await tortoiseSvnCommand(cmd, paths) }
+    catch (err) { get().showToast('TortoiseSVN を起動できません: ' + String(err)) }
+  },
+
+  runWinMerge: async (paths) => {
+    if (!paths.length) return
+    if (!isTauri) { get().showToast('WinMerge で比較'); return }
+    try { await winmergeCompare(paths) }
+    catch (err) { get().showToast('WinMerge を起動できません: ' + String(err)) }
   },
 
   addRule: (type) => set(s => ({ rename: { ...s.rename, rules: [...s.rename.rules, ruleDefaults(type)], addOpen: false } })),

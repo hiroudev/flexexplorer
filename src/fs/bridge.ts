@@ -162,6 +162,13 @@ export async function homeDir(): Promise<string> {
   return invoke<string>('home_dir')
 }
 
+/** Folder to show on startup instead of the session restore, if this process
+ * was launched with a path argument (external launcher / "FlexExplorerで表示"). */
+export async function launchPath(): Promise<string | null> {
+  if (!isTauri) return null
+  return invoke<string | null>('launch_path')
+}
+
 export async function openPath(segs: string[]): Promise<void> {
   await invoke('open_path', { path: joinPath(segs) })
 }
@@ -297,6 +304,31 @@ export async function notesSet(key: string, note: FolderNote): Promise<void> {
 export async function notesDelete(key: string): Promise<void> {
   if (!isTauri) return
   await invoke('notes_delete', { key })
+}
+
+// ---- external tool integration (TortoiseSVN / WinMerge) ----
+
+export interface ExternalToolsStatus {
+  tortoiseSvn: boolean
+  winmerge: boolean
+}
+
+/** Detects installed TortoiseSVN / WinMerge so the context menu can hide the
+ * entries entirely rather than offering commands that would just fail. */
+export async function externalToolsStatus(): Promise<ExternalToolsStatus> {
+  if (!isTauri) return { tortoiseSvn: false, winmerge: false }
+  return invoke<ExternalToolsStatus>('external_tools_status')
+}
+
+/** Runs a TortoiseSVN command (e.g. "commit", "update", "log", "diff") on the
+ * given absolute paths — the same thing TortoiseSVN's own shell extension does. */
+export async function tortoiseSvnCommand(cmd: string, paths: string[]): Promise<void> {
+  await invoke('tortoise_svn_command', { cmd, paths })
+}
+
+/** Opens WinMerge to compare 1–3 absolute paths (files or folders). */
+export async function winmergeCompare(paths: string[]): Promise<void> {
+  await invoke('winmerge_compare', { paths })
 }
 
 // ---- named workspaces (layout files) ----

@@ -457,7 +457,15 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
   }, [tab.focus, tab.id, isActive])
 
   const paneStyle: React.CSSProperties = {
-    position: 'relative', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column',
+    // In the 2-pane split layout (App.tsx) this is a plain block child of a
+    // width-only wrapper div, not itself a flex/grid item — without an
+    // explicit height it shrinks to its content (fewer files = a shorter
+    // pane) instead of matching its sibling. height:100% makes it always
+    // fill whatever definite height its container already has, in both that
+    // wrapper and the CSS-grid layout (where it's a real grid item stretched
+    // by the grid's own default alignment; explicit height is redundant
+    // there but harmless).
+    position: 'relative', minWidth: 0, minHeight: 0, height: '100%', display: 'flex', flexDirection: 'column',
     gridColumn: spanCols > 1 ? `span ${spanCols}` : undefined,
   }
 

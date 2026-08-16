@@ -114,6 +114,7 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && (e.key === 'x')) { e.preventDefault(); st.cutToClip(); return }
       if ((e.ctrlKey || e.metaKey) && (e.key === 'v')) { e.preventDefault(); void st.paste(); return }
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) { e.preventDefault(); st.reopenClosedTab(); return }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'G' || e.key === 'g')) { e.preventDefault(); st.reopenClosedLayoutGroup(); return }
       if ((e.ctrlKey || e.metaKey) && (e.key === 't')) { e.preventDefault(); st.newTab(ap); return }
       if ((e.ctrlKey || e.metaKey) && (e.key === 'w')) { e.preventDefault(); st.closeTab(ap, st.panes[ap].active); return }
       if (e.key === 'Delete') { e.preventDefault(); void st.deleteSelected(); return }

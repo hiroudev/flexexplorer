@@ -145,8 +145,12 @@ pub fn show_shell_context_menu(window: tauri::WebviewWindow, path: String, x: i3
 pub fn open_in_vscode(path: String) -> Result<(), String> {
     #[cfg(windows)]
     {
+        // Same console-flash issue as open_path: cmd.exe needs CREATE_NO_WINDOW.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         std::process::Command::new("cmd")
             .args(["/C", "code", &path])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| e.to_string())?;
         Ok(())

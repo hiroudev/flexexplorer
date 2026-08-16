@@ -1,3 +1,4 @@
+mod external;
 mod fs;
 mod icons;
 mod notes;
@@ -12,6 +13,7 @@ pub fn run() {
             fs::list_dir,
             fs::list_drives,
             fs::home_dir,
+            fs::launch_path,
             fs::open_path,
             fs::read_text_preview,
             fs::read_xlsx_preview,
@@ -35,6 +37,9 @@ pub fn run() {
             notes::notes_load,
             notes::notes_set,
             notes::notes_delete,
+            external::external_tools_status,
+            external::tortoise_svn_command,
+            external::winmerge_compare,
             workspaces::save_workspace,
             workspaces::list_workspaces,
             workspaces::load_workspace,
