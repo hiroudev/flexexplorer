@@ -180,6 +180,10 @@ export interface AppState {
   renaming: RenameState | null
   /** Which optional external tools were detected on this machine. */
   extTools: { tortoiseSvn: boolean; winmerge: boolean }
+  /** System-wide hotkey (e.g. "Ctrl+Alt+O") that pops the quick-open prompt
+   * even when FlexExplorer doesn't have focus. User-configurable. */
+  quickOpenHotkey: string
+  quickOpen: { open: boolean }
 }
 
 export interface IconInfo {

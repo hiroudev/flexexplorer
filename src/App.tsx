@@ -13,6 +13,8 @@ import OptionsModal from './components/modals/OptionsModal'
 import WorkspacesModal from './components/modals/WorkspacesModal'
 import CommandPalette from './components/overlays/CommandPalette'
 import GoToOverlay from './components/overlays/GoToOverlay'
+import QuickOpenOverlay from './components/overlays/QuickOpenOverlay'
+import { onOpenInTmpPane } from './fs/bridge'
 
 export default function App() {
   const panes = useStore(s => s.panes)
@@ -33,12 +35,27 @@ export default function App() {
   const modal = useStore(s => s.modal)
   const paletteOpen = useStore(s => s.palette.open)
   const gotoOpen = useStore(s => s.goto.open)
+  const quickOpenOpen = useStore(s => s.quickOpen.open)
   const accent = useStore(s => s.opt.accent)
 
   const panesRef = useRef<HTMLDivElement>(null)
 
   // Under Tauri, replace the mock panes with real directory listings.
   useEffect(() => { void useStore.getState().initTauri() }, [])
+
+  // System-wide "quick open" hotkey (default Ctrl+Alt+O, user-configurable
+  // in Options > ショートカット) — works even without focus, unlike every
+  // other shortcut here which is just a plain window keydown listener.
+  useEffect(() => { void useStore.getState().registerQuickOpenHotkey() }, [])
+
+  // A relaunch caught by the single-instance plugin (BlueWind, Win+R,
+  // FlexFind's "FlexExplorerで表示", …) lands here instead of opening a
+  // second window — show the requested folder in the "tmp" layout group.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    void onOpenInTmpPane(path => useStore.getState().openInTmpGroup(path)).then(u => { unlisten = u })
+    return () => unlisten?.()
+  }, [])
 
   // Track pane container width for responsive columns
   useEffect(() => {
@@ -62,6 +79,7 @@ export default function App() {
         closeCtx()
         useStore.getState().closePalette()
         useStore.getState().closeGoto()
+        useStore.getState().closeQuickOpen()
         useStore.getState().closeModal()
         return
       }
@@ -80,7 +98,7 @@ export default function App() {
       }
 
       // Skip navigation shortcuts when in modals/palette/goto
-      if (modal || paletteOpen || gotoOpen || inInput) return
+      if (modal || paletteOpen || gotoOpen || quickOpenOpen || inInput) return
 
       if (e.key === ' ') { e.preventDefault(); toggleInspector(); return }
       if ((e.ctrlKey || e.metaKey) && e.key === 'b') { e.preventDefault(); toggleSidebar(); return }
@@ -145,7 +163,7 @@ export default function App() {
 
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [modal, paletteOpen, gotoOpen, closeCtx, openPalette, openModal, openGoto, toggleInspector, toggleSidebar, toggleTheme, moveSel])
+  }, [modal, paletteOpen, gotoOpen, quickOpenOpen, closeCtx, openPalette, openModal, openGoto, toggleInspector, toggleSidebar, toggleTheme, moveSel])
 
   // Mouse drag events
   useEffect(() => {
@@ -218,6 +236,7 @@ export default function App() {
       <WorkspacesModal />
       <CommandPalette />
       <GoToOverlay />
+      <QuickOpenOverlay />
     </div>
   )
 }

@@ -1,7 +1,7 @@
 {
   "name": "flex-explorer",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.5.0",
+    "@tauri-apps/plugin-global-shortcut": "^2.0.0",
     "flex-design": "github:hiroudev/flex-design",
     "marked": "^14.1.4",
     "react": "^18.3.1",

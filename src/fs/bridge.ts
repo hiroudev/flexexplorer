@@ -169,6 +169,16 @@ export async function launchPath(): Promise<string | null> {
   return invoke<string | null>('launch_path')
 }
 
+/** Subscribes to relaunch requests caught by the single-instance plugin (a
+ * second `FlexExplorer.exe "<path>"` launch — BlueWind's filer setting,
+ * Win+R, FlexFind's "FlexExplorerで表示" — hands its folder here instead of
+ * opening a second window). Returns an unsubscribe function. */
+export async function onOpenInTmpPane(cb: (path: string) => void): Promise<() => void> {
+  if (!isTauri) return () => {}
+  const { listen } = await import('@tauri-apps/api/event')
+  return listen<string>('open-in-tmp-pane', e => cb(e.payload))
+}
+
 export async function openPath(segs: string[]): Promise<void> {
   await invoke('open_path', { path: joinPath(segs) })
 }
@@ -260,6 +270,19 @@ export async function showShellContextMenu(absPath: string, x: number, y: number
 
 export async function createShortcut(absPath: string): Promise<string> {
   return invoke<string>('create_shortcut', { target: absPath })
+}
+
+export interface ShortcutTarget {
+  target: string
+  isDir: boolean
+}
+
+/** Resolves a `.lnk` shortcut's target path — used so opening a shortcut to a
+ * folder navigates inside FlexExplorer instead of bouncing out to Explorer
+ * (which is what a `.lnk`'s default shell activation always does for a
+ * folder target, regardless of which app opened the shortcut). */
+export async function resolveShortcut(absPath: string): Promise<ShortcutTarget> {
+  return invoke<ShortcutTarget>('resolve_shortcut', { path: absPath })
 }
 
 /** Creates a `<name>へのショートカット.txt` next to absPath, containing its path as
@@ -425,4 +448,66 @@ export async function winStartDragging(): Promise<void> {
   if (!isTauri) return
   const { getCurrentWindow } = await import('@tauri-apps/api/window')
   await getCurrentWindow().startDragging()
+}
+
+/** Un-minimizes, shows, and focuses the main window — used when a global
+ * hotkey or a BlueWind/Win+R relaunch wants the app to come to the front. */
+export async function focusMainWindow(): Promise<void> {
+  if (!isTauri) return
+  const { getCurrentWindow } = await import('@tauri-apps/api/window')
+  const w = getCurrentWindow()
+  await w.unminimize()
+  await w.show()
+  await w.setFocus()
+}
+
+// ---- global hotkey (system-wide, works even without focus) ----
+
+/** Registers `combo` (e.g. "Ctrl+Alt+O") as a system-wide hotkey; `onPressed`
+ * fires on key-down only (the plugin also reports release events). Returns
+ * false if registration failed (e.g. another app already owns that combo). */
+export async function registerGlobalShortcut(combo: string, onPressed: () => void): Promise<boolean> {
+  if (!isTauri) return false
+  try {
+    const { register } = await import('@tauri-apps/plugin-global-shortcut')
+    await register(combo, event => { if (event.state === 'Pressed') onPressed() })
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function unregisterGlobalShortcut(combo: string): Promise<void> {
+  if (!isTauri) return
+  try {
+    const { unregister } = await import('@tauri-apps/plugin-global-shortcut')
+    await unregister(combo)
+  } catch { /* not registered, or already gone — fine either way */ }
+}
+
+// ---- secondary windows ----
+
+/** Opens a named workspace in a brand-new window, leaving the current
+ * window's live layout untouched. The new window boots with `?workspace=`
+ * on its URL; `initTauri()` picks that up and loads the workspace instead of
+ * the usual session restore. Window labels are prefixed "workspace-" to
+ * match the capability grant in src-tauri/capabilities/default.json. */
+export async function openWorkspaceInNewWindow(name: string): Promise<void> {
+  if (!isTauri) return
+  const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow')
+  const label = 'workspace-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
+  new WebviewWindow(label, {
+    url: 'index.html?workspace=' + encodeURIComponent(name),
+    title: `FlexExplorer — ${name}`,
+    width: 1280,
+    height: 800,
+    minWidth: 880,
+    minHeight: 560,
+    resizable: true,
+    fullscreen: false,
+    decorations: false,
+    transparent: false,
+    center: true,
+    dragDropEnabled: false,
+  })
 }

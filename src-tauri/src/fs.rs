@@ -156,22 +156,30 @@ pub fn home_dir() -> String {
     dirs_home().unwrap_or_default()
 }
 
-/// A folder to show on startup instead of the usual session restore, passed
-/// as this process's first command-line argument — e.g. a launcher (BlueWind's
-/// "フォルダを開くファイラー" setting) or FlexFind's "FlexExplorerで表示"
-/// invoking `FlexExplorer.exe "<path>"`. A file argument resolves to its
-/// containing folder; anything else is ignored.
-#[tauri::command]
-pub fn launch_path() -> Option<String> {
-    let raw = std::env::args().nth(1)?;
-    let p = Path::new(&raw);
+/// Resolves a launch/relaunch argument to a folder to show: a directory as-is,
+/// a file to its containing folder, anything else ignored. Shared by both a
+/// cold start's argv (`launch_path`) and a warm relaunch caught by the
+/// single-instance plugin (see `lib.rs`).
+pub fn resolve_launch_target(raw: &str) -> Option<String> {
+    let p = Path::new(raw);
     if p.is_dir() {
-        Some(raw)
+        Some(raw.to_string())
     } else if p.is_file() {
         p.parent().map(|d| d.to_string_lossy().to_string())
     } else {
         None
     }
+}
+
+/// A folder to show on startup instead of the usual session restore, passed
+/// as this process's first command-line argument — e.g. a launcher (BlueWind's
+/// "フォルダを開くファイラー"設定) or FlexFind's "FlexExplorerで表示"
+/// invoking `FlexExplorer.exe "<path>"`. A file argument resolves to its
+/// containing folder; anything else is ignored.
+#[tauri::command]
+pub fn launch_path() -> Option<String> {
+    let raw = std::env::args().nth(1)?;
+    resolve_launch_target(&raw)
 }
 
 fn dirs_home() -> Option<String> {

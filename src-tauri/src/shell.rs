@@ -1,6 +1,34 @@
 //! Native Windows shell verbs/dialogs so the app's context menu can reuse
 //! Explorer's real behaviour (Properties dialog, "Open with", shortcut, …).
 
+use serde::Serialize;
+
+/// Where a `.lnk` shortcut points, and whether that's a folder — so the
+/// frontend can navigate to it directly instead of falling through to
+/// `open_path`, which would hand a folder target to Explorer (a `.lnk`'s
+/// default shell activation always resolves through Explorer, never through
+/// whatever app FlexExplorer itself is running as).
+#[derive(Serialize)]
+pub struct ShortcutTarget {
+    pub target: String,
+    #[serde(rename = "isDir")]
+    pub is_dir: bool,
+}
+
+/// Resolves a `.lnk` shortcut's target path (see `ShortcutTarget`).
+#[tauri::command]
+pub fn resolve_shortcut(path: String) -> Result<ShortcutTarget, String> {
+    #[cfg(windows)]
+    {
+        win::resolve_shortcut(&path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err("shortcuts are only available on Windows".into())
+    }
+}
+
 /// Invoke a shell verb on a path (e.g. "properties", "openas").
 #[tauri::command]
 pub fn shell_verb(path: String, verb: String) -> Result<(), String> {
@@ -168,7 +196,7 @@ mod win {
     use windows::core::{Interface, PCWSTR};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
-        COINIT_APARTMENTTHREADED,
+        COINIT_APARTMENTTHREADED, STGM_READ,
     };
     use windows::Win32::UI::Shell::{
         IShellLinkW, ShellExecuteExW, ShellLink, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW,
@@ -177,6 +205,32 @@ mod win {
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// Reads a `.lnk`'s target path via `IPersistFile::Load` + `IShellLinkW::GetPath`
+    /// (the same COM pair `create_shortcut` uses in reverse to write one).
+    pub fn resolve_shortcut(path: &str) -> Result<super::ShortcutTarget, String> {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let result = (|| -> Result<super::ShortcutTarget, String> {
+                let link: IShellLinkW =
+                    CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| e.to_string())?;
+                let persist: IPersistFile = link.cast().map_err(|e| e.to_string())?;
+                let wpath = wide(path);
+                persist.Load(PCWSTR(wpath.as_ptr()), STGM_READ).map_err(|e| e.to_string())?;
+                let mut buf = [0u16; 4096];
+                link.GetPath(&mut buf, std::ptr::null_mut(), 0).map_err(|e| e.to_string())?;
+                let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                let target = String::from_utf16_lossy(&buf[..end]);
+                if target.is_empty() {
+                    return Err("ショートカットの参照先を取得できません".into());
+                }
+                let is_dir = Path::new(&target).is_dir();
+                Ok(super::ShortcutTarget { target, is_dir })
+            })();
+            CoUninitialize();
+            result
+        }
     }
 
     pub fn shell_verb(path: &str, verb: &str) -> Result<(), String> {

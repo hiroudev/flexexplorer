@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react'
-import { useStore } from '../../store/useStore'
+import { useStore, QUICK_OPEN_CAPTURE_ID } from '../../store/useStore'
 import type { OptTab, AppearanceOptions } from '../../types'
 import { THEME_LIST, THEMES } from 'flex-design/themes/presets.js'
 import type { FlexTheme } from 'flex-design/themes/presets.js'
@@ -262,14 +262,31 @@ function ShortcutsTab() {
   const capturing = useStore(s => s.capturing)
   const startCapture = useStore(s => s.startCapture)
   const captureKey = useStore(s => s.captureKey)
+  const quickOpenHotkey = useStore(s => s.quickOpenHotkey)
   const [filter, setFilter] = useState('')
   const fl = filter.trim().toLowerCase()
 
   const allBindValues = Object.values(binds)
   const conflicts = new Set(allBindValues.filter((v, i) => allBindValues.indexOf(v) !== i))
+  const capturingQuickOpen = capturing === QUICK_OPEN_CAPTURE_ID
 
   return (
     <div>
+      <Section title="グローバルホットキー" />
+      <div style={{ marginBottom: 14, border: '1px solid var(--border)', borderRadius: 7, overflow: 'hidden' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px', padding: '9px 10px', alignItems: 'center', fontSize: 12.5 }}>
+          <div>
+            <div style={{ color: 'var(--text)' }}>クイックオープン</div>
+            <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>FlexExplorerにフォーカスが無くても呼び出せます。パスを入力してtmpグループの新規ペインで開きます</div>
+          </div>
+          <span
+            onClick={() => startCapture(QUICK_OPEN_CAPTURE_ID)}
+            title="クリックして変更"
+            style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--accent)', background: capturingQuickOpen ? 'var(--accent)' : 'var(--bg-page)', border: `1px solid ${capturingQuickOpen ? 'var(--accent)' : 'var(--border-strong)'}`, borderRadius: 4, padding: '3px 8px', cursor: 'default', textAlign: 'center' }}
+          >{capturingQuickOpen ? '…' : quickOpenHotkey}</span>
+        </div>
+      </div>
+
       <div style={{ marginBottom: 10 }}>
         <input
           value={filter}

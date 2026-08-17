@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for the FlexExplorer main window.",
-  "windows": ["main"],
+  "description": "Default capabilities for the FlexExplorer main window and any secondary windows it opens (e.g. \"open workspace in new window\").",
+  "windows": ["main", "workspace-*"],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",
@@ -12,6 +12,8 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "core:window:allow-is-maximized",
-    "core:window:allow-set-title"
+    "core:window:allow-set-title",
+    "core:webview:allow-create-webview-window",
+    "global-shortcut:default"
   ]
 }

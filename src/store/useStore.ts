@@ -7,10 +7,11 @@ import { fmt, fmtDate, hashStr, uidFor, applyRules, visibleIndices } from '../ut
 import {
   isTauri, isRealPath, listDir, listDrives, homeDir, launchPath, openPath, splitPath, joinPath, renamePath,
   copyEntries, moveEntries, deleteEntries, createFolder, createNewItem as bridgeCreateNewItem, searchDir, copyText,
-  shellVerb, showShellContextMenu, createShortcut, createPathShortcutText, revealInExplorer, openInTerminal, openInVscode, duplicateAsDatedCopy,
+  shellVerb, showShellContextMenu, createShortcut, resolveShortcut, createPathShortcutText, revealInExplorer, openInTerminal, openInVscode, duplicateAsDatedCopy,
   saveWorkspace, listWorkspaces, loadWorkspace, deleteWorkspace,
   noteKey, notesLoad, notesSet, notesDelete,
   externalToolsStatus, tortoiseSvnCommand, winmergeCompare,
+  focusMainWindow, registerGlobalShortcut, unregisterGlobalShortcut, openWorkspaceInNewWindow,
 } from '../fs/bridge'
 
 const F = (name: string, o: Partial<FileEntry> = {}): FileEntry => ({ name, ...o })
@@ -67,6 +68,11 @@ function makePane1(): Pane {
     ],
   }
 }
+
+/** Reserved `capturing` id for the global quick-open hotkey (see ShortcutsTab
+ * in OptionsModal.tsx) — distinguishes it from the cosmetic per-action binds
+ * in SHORTCUT_GROUPS below, since changing it has to re-register with the OS. */
+export const QUICK_OPEN_CAPTURE_ID = '__quickOpenHotkey'
 
 const SHORTCUT_GROUPS = [
   { title: 'ナビゲーション', items: [['nav.up','上の項目へ','↑'],['nav.down','下の項目へ','↓'],['nav.parent','親フォルダへ','Alt+↑'],['nav.back','戻る','Alt+←'],['nav.forward','進む','Alt+→'],['nav.open','開く / フォルダへ','Enter'],['nav.newtab','新しいタブ','Ctrl+T'],['nav.closetab','タブを閉じる','Ctrl+W'],['cmd.goto','GoTo','Ctrl+G'],['view.split','ペインを切替','Ctrl+\\']] },
@@ -134,6 +140,26 @@ function makePaneFrom(src: PaneTab): Pane {
   }
 }
 
+/** Create a new single-tab pane showing an arbitrary path — used for
+ * BlueWind/Win+R relaunches, which name a folder that may not be open
+ * anywhere yet, so there's no existing tab to clone from. Listing is empty
+ * until the caller follows up with `navigate()`. */
+function makePaneForPath(path: string): Pane {
+  const segs = splitPath(path)
+  return {
+    active: 0,
+    tabs: [{
+      id: 'p' + rid(),
+      title: segs[segs.length - 1] || segs[0] || path,
+      path: segs,
+      files: [],
+      focus: 0,
+      sel: [],
+      columns: defCols(),
+    }],
+  }
+}
+
 /** Absolute paths of the currently selected entries (handles search results). */
 function selectedAbs(t: PaneTab): string[] {
   return t.sel.map(i => t.files[i]).filter(Boolean).map(f => f.abs || joinPath([...t.path, f.name]))
@@ -153,6 +179,7 @@ interface Actions {
   // panes
   selectFile(pi: number, idx: number, e?: React.MouseEvent): void
   openFile(pi: number, idx: number): void
+  openPathOrShortcut(pi: number, segs: string[], abs: string): Promise<void>
   openFolderTab(pi: number, name: string): void
   // real filesystem navigation (Tauri); no-ops on the plain web build
   navigate(pi: number, segs: string[], opts?: { newTab?: boolean; push?: boolean }): Promise<void>
@@ -210,6 +237,15 @@ interface Actions {
   addLayoutGroup(): void
   closeLayoutGroup(i: number): void
   reopenClosedLayoutGroup(): void
+  /** Opens `path` in a fresh pane inside the "tmp" layout group, creating that
+   * group first if it doesn't exist yet. Used for relaunches (BlueWind/Win+R). */
+  openInTmpGroup(path: string): void
+  // global "quick open" hotkey + its prompt overlay
+  registerQuickOpenHotkey(): Promise<void>
+  setQuickOpenHotkey(combo: string): Promise<void>
+  openQuickOpen(): void
+  closeQuickOpen(): void
+  submitQuickOpen(path: string): void
   renameLayoutGroup(i: number, name: string): void
   // tabs: pin / cleanup / restore / drag-reorder / move between panes
   toggleTabPin(pi: number, ti: number): void
@@ -249,6 +285,8 @@ interface Actions {
   applyWorkspace(data: SessionData): Promise<void>
   saveWorkspaceAs(name: string): Promise<void>
   loadNamedWorkspace(name: string): Promise<void>
+  /** Opens `name` in a brand-new window instead of replacing this one's live state. */
+  openWorkspaceInNewWindow(name: string): Promise<void>
   deleteNamedWorkspace(name: string): Promise<void>
   refreshWorkspaces(): Promise<void>
   // inline rename (F2 / slow second click on a selected row)
@@ -445,6 +483,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   notes: {},
   renaming: null,
   extTools: { tortoiseSvn: false, winmerge: false },
+  quickOpenHotkey: 'Ctrl+Alt+O',
+  quickOpen: { open: false },
 
   setTheme: (t) => { applyTheme(t, document.documentElement); set({ theme: t, opt: { ...get().opt, theme: t } }) },
   toggleTheme: () => {
@@ -477,15 +517,31 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (f.abs) {
       const segs = splitPath(f.abs)
       if (f.folder) { void get().navigate(pi, segs); return }
-      if (isTauri) { openPath(segs).catch(err => get().showToast('開けません: ' + String(err))); set({ inspectorOpen: true }); return }
+      if (isTauri) { void get().openPathOrShortcut(pi, segs, f.abs); set({ inspectorOpen: true }); return }
     }
     if (f.folder) { get().openFolderTab(pi, f.name); return }
     if (isTauri && isRealPath(tab.path)) {
-      openPath([...tab.path, f.name]).catch(err => get().showToast('開けません: ' + String(err)))
+      const abs = joinPath([...tab.path, f.name])
+      void get().openPathOrShortcut(pi, [...tab.path, f.name], abs)
       set({ inspectorOpen: true })
       return
     }
     set({ inspectorOpen: true }); get().showToast('開く: ' + f.name)
+  },
+
+  /** Opens `segs` with the OS default handler — except a `.lnk` pointing at a
+   * folder, which is resolved and navigated to inside FlexExplorer instead.
+   * A `.lnk`'s normal shell activation always resolves through Explorer for
+   * folder targets, regardless of what app opened it, so without this every
+   * shortcut click would bounce out to the standard Explorer window. */
+  openPathOrShortcut: async (pi, segs, abs) => {
+    if (abs.toLowerCase().endsWith('.lnk')) {
+      try {
+        const r = await resolveShortcut(abs)
+        if (r.isDir) { await get().navigate(pi, splitPath(r.target)); return }
+      } catch { /* fall through to default handling below */ }
+    }
+    openPath(segs).catch(err => get().showToast('開けません: ' + String(err)))
   },
 
   openFolderTab: (pi, name) => {
@@ -604,6 +660,22 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       void get().refreshWorkspaces()
       void get().loadNotes()
       void get().loadExtTools()
+
+      // This window was opened via "新規ウィンドウで開く" on a saved
+      // workspace (see bridge.ts openWorkspaceInNewWindow) — it carries the
+      // workspace name on its own URL rather than argv, since it's a second
+      // window in the same process, not a second process. Takes priority
+      // over everything else: this window exists for exactly this purpose.
+      const wsParam = new URLSearchParams(window.location.search).get('workspace')
+      if (wsParam) {
+        try {
+          const json = await loadWorkspace(wsParam)
+          await get().applyWorkspace(JSON.parse(json) as SessionData)
+          set({ activePane: 0 })
+          return
+        } catch (err) { get().showToast('ワークスペースの読込に失敗: ' + String(err)) }
+        // fall through to the usual defaults below if it failed
+      }
 
       // Launched with a folder argument — an external launcher (BlueWind's
       // "フォルダを開くファイラー" pointed at this exe) or FlexFind's
@@ -1108,6 +1180,67 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     get().showToast(`グループ「${restored.name}」を復元しました`)
   },
 
+  openInTmpGroup: (path) => {
+    const s = get()
+    const newPane = makePaneForPath(path)
+    const gi = s.layouts.findIndex(g => g.name === 'tmp')
+
+    if (gi < 0) {
+      // No "tmp" group yet: stash whatever's currently live into its own
+      // slot, then append a fresh one-pane group for this path.
+      const stashed = s.layouts.map((g, i) => i === s.activeLayout
+        ? { ...g, panes: clonePanes(s.panes), gridCols: s.gridCols, activePane: s.activePane }
+        : g)
+      const group: LayoutGroup = { id: 'g' + rid(), name: 'tmp', panes: [newPane], gridCols: 1, activePane: 0 }
+      const layouts = [...stashed, group]
+      set({ layouts, activeLayout: layouts.length - 1, panes: [newPane], gridCols: 1, activePane: 0 })
+    } else {
+      // "tmp" exists: switch to it (a no-op if it's already active — this
+      // stashes the live state of whatever group WAS active into its slot),
+      // then append a new pane rather than reusing an existing one.
+      if (gi !== s.activeLayout) get().switchLayoutGroup(gi)
+      const live = get()
+      if (live.panes.length >= MAX_PANES) { get().showToast('これ以上ペインを追加できません'); return }
+      const panes = [...clonePanes(live.panes), newPane]
+      // Same growth rule as addPaneRight: widen by one column, capped.
+      set({ panes, gridCols: Math.min(MAX_COLS, live.gridCols + 1), activePane: panes.length - 1 })
+    }
+
+    const targetPane = get().panes.length - 1
+    void get().navigate(targetPane, splitPath(path), { push: false })
+  },
+
+  registerQuickOpenHotkey: async () => {
+    if (!isTauri) return
+    const combo = get().quickOpenHotkey
+    const ok = await registerGlobalShortcut(combo, () => {
+      void focusMainWindow()
+      useStore.getState().openQuickOpen()
+    })
+    if (!ok) get().showToast(`グローバルホットキー(${combo})の登録に失敗しました`)
+  },
+
+  setQuickOpenHotkey: async (combo) => {
+    const prev = get().quickOpenHotkey
+    if (prev === combo || !combo) return
+    if (isTauri) await unregisterGlobalShortcut(prev)
+    set({ quickOpenHotkey: combo })
+    if (!isTauri) return
+    const ok = await registerGlobalShortcut(combo, () => {
+      void focusMainWindow()
+      useStore.getState().openQuickOpen()
+    })
+    get().showToast(ok ? `ホットキーを ${combo} に変更しました` : `ホットキー(${combo})の登録に失敗しました(他のアプリが使用中の可能性)`)
+  },
+
+  openQuickOpen: () => set({ quickOpen: { open: true }, ctx: null, modal: null }),
+  closeQuickOpen: () => set({ quickOpen: { open: false } }),
+  submitQuickOpen: (path) => {
+    const v = path.trim()
+    set({ quickOpen: { open: false } })
+    if (v) get().openInTmpGroup(v)
+  },
+
   renameLayoutGroup: (i, name) => set(s => {
     const nm = name.trim()
     if (!nm) return {}
@@ -1363,6 +1496,12 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     } catch (err) { get().showToast('読込失敗: ' + String(err)) }
   },
 
+  openWorkspaceInNewWindow: async (name) => {
+    if (!isTauri) { get().showToast('新規ウィンドウはデスクトップアプリで利用できます'); return }
+    await openWorkspaceInNewWindow(name)
+    set({ modal: null })
+  },
+
   deleteNamedWorkspace: async (name) => {
     try {
       await deleteWorkspace(name)
@@ -1534,7 +1673,13 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   },
   toggleAdv: (k) => set(s => ({ adv: { ...s.adv, [k]: !s.adv[k] } })),
   startCapture: (id) => set({ capturing: id }),
-  captureKey: (combo) => set(s => ({ binds: { ...s.binds, [s.capturing!]: combo }, capturing: null })),
+  captureKey: (combo) => {
+    const id = get().capturing
+    // The global quick-open hotkey isn't a cosmetic `binds` entry like the
+    // rest of SHORTCUT_GROUPS — it has to be re-registered with the OS.
+    if (id === QUICK_OPEN_CAPTURE_ID) { set({ capturing: null }); void get().setQuickOpenHotkey(combo); return }
+    set(s => ({ binds: { ...s.binds, [id!]: combo }, capturing: null }))
+  },
   exportShortcuts: () => get().showToast('shortcuts.json をエクスポートしました'),
   importShortcuts: () => get().showToast('shortcuts.json を読み込みました'),
 
@@ -1595,6 +1740,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     inspectorW: s.inspectorW,
     inspectorOpen: s.inspectorOpen,
     pane0Pct: s.pane0Pct,
+    quickOpenHotkey: s.quickOpenHotkey,
   }),
 }))
 
