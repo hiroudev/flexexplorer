@@ -227,6 +227,58 @@ pub fn open_path(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// One candidate for the "swap this path segment, keep the rest" navigation
+/// (see `sibling_folders`).
+#[derive(Serialize)]
+pub struct SiblingDto {
+    pub name: String,
+    /// How many segments of the requested tail exist under this sibling.
+    pub depth: usize,
+    /// Whether the whole tail exists — i.e. the same structure is present.
+    #[serde(rename = "hasTail")]
+    pub has_tail: bool,
+}
+
+/// Folders sitting alongside a path segment, each reporting how much of
+/// `tail` it also contains.
+///
+/// This backs switching `…/10:2026/10:基本設計/hoge` to
+/// `…/20:2027/10:基本設計/hoge`: `parent` is the folder holding the segment
+/// being swapped, and `tail` is everything below it that should be carried
+/// over. Probing is a plain `is_dir` walk per sibling, so a few dozen
+/// siblings cost almost nothing.
+#[tauri::command]
+pub fn sibling_folders(parent: String, tail: Vec<String>) -> Result<Vec<SiblingDto>, String> {
+    let dir = PathBuf::from(&parent);
+    let read = std::fs::read_dir(&dir).map_err(|e| format!("{parent}: {e}"))?;
+
+    let mut out: Vec<SiblingDto> = Vec::new();
+    for entry in read.flatten() {
+        let p = entry.path();
+        if !entry.metadata().map(|m| m.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let mut probe = p.clone();
+        let mut depth = 0;
+        for seg in &tail {
+            probe.push(seg);
+            if probe.is_dir() {
+                depth += 1;
+            } else {
+                break;
+            }
+        }
+        out.push(SiblingDto {
+            has_tail: depth == tail.len(),
+            depth,
+            name,
+        });
+    }
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(out)
+}
+
 /// Extract a text preview of a spreadsheet's first sheet (xlsx/xls/ods/csv).
 #[tauri::command]
 pub fn read_xlsx_preview(path: String, max_rows: usize, max_cols: usize) -> Result<String, String> {

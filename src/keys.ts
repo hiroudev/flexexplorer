@@ -101,6 +101,12 @@ export const ACTIONS: Record<string, (st: Store) => void> = {
   'tab.next': st => st.cycleTab(st.activePane, 1),
   'tab.reopen': st => st.reopenClosedTab(),
 
+  // selection
+  'edit.selectall': st => st.selectAll(),
+  'edit.invertsel': st => st.invertSelection(),
+  'edit.clearsel': st => st.clearSelection(),
+  'view.hidden': st => st.toggleAdv('hidden'),
+
   // editing
   'edit.copy': st => st.copyToClip(),
   'edit.cut': st => st.cutToClip(),

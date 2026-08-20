@@ -374,7 +374,7 @@ function FilesTab() {
   return (
     <div>
       <Section title="表示" />
-      <Row label="隠しファイルを表示" desc="ドットから始まるファイルとシステムファイル">
+      <Row label="隠しファイルを表示" desc="ドットから始まるファイルとシステムファイル（Ctrl+H）">
         <Toggle value={adv.hidden} onChange={() => toggleAdv('hidden')} />
       </Row>
       <Row label="拡張子を常に表示" desc="既知の種類でも拡張子を表示する">

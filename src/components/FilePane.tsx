@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useStore, NOTE_MIN_H, NOTE_MAX_H, navAvailability } from '../store/useStore'
 import { iconOf, visibleIndices, fmt } from '../utils/fileUtils'
 import { PANE_MIME } from './LayoutTabs'
+import SegmentSwitcher from './SegmentSwitcher'
 import { latestGenerationIndices } from '../utils/generations'
 import { shellIcon, peekIcon, joinPath, splitPath, noteKey, copyText } from '../fs/bridge'
 import type { Pane, FileEntry, ColumnDef, ColumnId } from '../types'
@@ -536,6 +537,7 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
   const renaming = useStore(s => s.renaming)
   const clip = useStore(s => s.clip)
   const paneNavButtons = useStore(s => s.adv.paneNavButtons)
+  const showHidden = useStore(s => s.adv.hidden)
   const genHighlight = useStore(s => s.genHighlight)
   const genRules = useStore(s => s.genRules)
   const [paneDragOver, setPaneDragOver] = useState(false)
@@ -543,6 +545,8 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
   const [tabDragOver, setTabDragOver] = useState<{ ti: number; side: 'before' | 'after' } | null>(null)
   const [tabCtx, setTabCtx] = useState<{ ti: number; x: number; y: number } | null>(null)
   const [addrCtx, setAddrCtx] = useState<{ x: number; y: number } | null>(null)
+  /** Which breadcrumb segment has its ▼ switcher open, if any. */
+  const [swapCi, setSwapCi] = useState<{ ci: number; x: number; y: number } | null>(null)
 
   const isActive = pi === activePane
   const renamingIdx = renaming && renaming.pi === pi ? renaming.idx : -1
@@ -568,7 +572,7 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
   const cols = visibleColumns(tab.columns, pw)
   const gridCols = gridTemplate(cols)
   const q = searchMode === 'filter' ? search.trim().toLowerCase() : ''
-  const vis = visibleIndices(tab, q)
+  const vis = visibleIndices(tab, q, showHidden)
 
   // Keep the focused row visible when focus moves via the keyboard.
   const listRef = useRef<HTMLDivElement>(null)
@@ -759,8 +763,11 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
             <>
               {tab.path.map((seg, ci) => {
                 const last = ci === tab.path.length - 1
+                // The drive/share root has no siblings to swap between, and the
+                // last crumb is the edit affordance, so neither gets a ▾.
+                const swappable = ci > 0 && !last
                 return (
-                  <span key={ci} style={{ display: 'flex', alignItems: 'center' }}>
+                  <span key={ci} style={{ display: 'flex', alignItems: 'center', position: 'relative' }}>
                     <span
                       onClick={e => { e.stopPropagation(); if (last) startAddressEdit(pi); else navBreadcrumb(pi, ci) }}
                       title={last ? 'クリックでパスを編集' : seg + ' へ移動'}
@@ -768,6 +775,22 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
                       onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text)' }}
                       onMouseLeave={e => { e.currentTarget.style.background = ''; e.currentTarget.style.color = last ? 'var(--text)' : 'var(--text-muted)' }}
                     >{seg}</span>
+                    {swappable && (
+                      <span
+                        onClick={e => {
+                          e.stopPropagation()
+                          const r = e.currentTarget.getBoundingClientRect()
+                          setSwapCi(v => (v?.ci === ci ? null : { ci, x: r.left, y: r.bottom + 2 }))
+                        }}
+                        title={'この階層だけ切り替え（下の階層は維持）'}
+                        style={{ padding: '2px 3px', borderRadius: 4, cursor: 'default', fontSize: 8, flex: '0 0 auto', color: swapCi?.ci === ci ? 'var(--accent)' : 'var(--text-faint)' }}
+                        onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text)' }}
+                        onMouseLeave={e => { e.currentTarget.style.background = ''; e.currentTarget.style.color = swapCi?.ci === ci ? 'var(--accent)' : 'var(--text-faint)' }}
+                      >▼</span>
+                    )}
+                    {swapCi?.ci === ci && (
+                      <SegmentSwitcher pi={pi} path={tab.path} ci={ci} anchor={{ x: swapCi.x, y: swapCi.y }} onClose={() => setSwapCi(null)} />
+                    )}
                     {!last && <span style={{ color: 'var(--text-faint)', padding: '0 1px', flex: '0 0 auto' }}>›</span>}
                   </span>
                 )

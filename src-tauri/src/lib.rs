@@ -4,6 +4,7 @@ mod icons;
 mod notes;
 mod shell;
 mod shellnew;
+mod transfer;
 mod workspaces;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -39,6 +40,10 @@ pub fn run() {
             fs::open_path,
             fs::read_text_preview,
             fs::read_xlsx_preview,
+            fs::sibling_folders,
+            transfer::plan_transfer,
+            transfer::start_transfer,
+            transfer::cancel_transfer,
             fs::rename_path,
             fs::copy_entries,
             fs::move_entries,

@@ -2,6 +2,9 @@ export interface FileEntry {
   name: string
   folder?: boolean
   dim?: boolean
+  /** OS-hidden (dotfile or hidden/system attribute). Filtered out unless
+   * 設定 > ファイル表示 > 隠しファイルを表示 is on. */
+  hidden?: boolean
   ext?: string
   size?: number
   m?: string   // modified date string "YYYY/MM/DD HH:mm"
@@ -194,6 +197,34 @@ export interface AppState {
    * even when FlexExplorer doesn't have focus. User-configurable. */
   quickOpenHotkey: string
   quickOpen: { open: boolean }
+  /** A copy/move being watched: progress for the bar, plus what to refresh
+   * and re-ask when it ends. Null when nothing is running. */
+  transfer: {
+    id: string
+    mode: 'copy' | 'move'
+    done: number
+    total: number
+    bytesDone: number
+    bytesTotal: number
+    current: string
+  } | null
+  /** A pending name collision waiting on the user's answer. */
+  conflict: {
+    names: string[]
+    mode: 'copy' | 'move'
+    paths: string[]
+    dest: string[]
+    srcPi: number
+  } | null
+  /** A destructive action waiting on confirmation (設定 > 削除前に確認). */
+  confirm: {
+    title: string
+    body: string
+    okLabel: string
+    /** Only 'delete' for now; keeps the pending action serialisable. */
+    kind: 'delete'
+    paths: string[]
+  } | null
   /** Highlight the newest file of each generation set (see utils/generations). */
   genHighlight: boolean
   /** User overrides for how names are grouped into generation sets. */

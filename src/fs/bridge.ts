@@ -106,7 +106,7 @@ function toFileEntry(d: DirEntryDto): FileEntry {
     m: d.m,
     c: d.c,
   }
-  if (d.hidden) e.dim = true
+  if (d.hidden) { e.dim = true; e.hidden = true }
   const pv = previewType(d.name, d.ext, d.folder)
   if (pv) e.pv = pv
   return e
@@ -270,6 +270,80 @@ export async function showShellContextMenu(absPath: string, x: number, y: number
 
 export async function createShortcut(absPath: string, destDir?: string): Promise<string> {
   return invoke<string>('create_shortcut', { target: absPath, destDir: destDir ?? null })
+}
+
+/** One option for swapping a path segment while keeping the segments below it
+ * (see `siblingFolders`). */
+export interface Sibling {
+  name: string
+  /** How many segments of the requested tail this sibling actually contains. */
+  depth: number
+  hasTail: boolean
+}
+
+/** Folders alongside a path segment, each reporting how much of `tail` it also
+ * contains — the data behind the breadcrumb's ▾ switcher. */
+export async function siblingFolders(parent: string[], tail: string[]): Promise<Sibling[]> {
+  if (!isTauri) return []
+  return invoke<Sibling[]>('sibling_folders', { parent: joinPath(parent), tail })
+}
+
+// ---- watchable copy/move (see src-tauri/src/transfer.rs) ----
+
+export interface TransferPlan {
+  files: number
+  bytes: number
+  /** Top-level names that already exist in the destination. */
+  conflicts: string[]
+}
+
+export type ConflictChoice = 'overwrite' | 'keepboth' | 'skip'
+
+export interface TransferProgress {
+  id: string
+  done: number
+  total: number
+  bytesDone: number
+  bytesTotal: number
+  current: string
+}
+
+export interface TransferDone {
+  id: string
+  ok: number
+  skipped: number
+  cancelled: boolean
+  errors: string[]
+}
+
+/** What a transfer would involve, without touching anything yet. */
+export async function planTransfer(paths: string[], destDir: string): Promise<TransferPlan> {
+  return invoke<TransferPlan>('plan_transfer', { paths, destDir })
+}
+
+/** Kicks off a transfer; resolves as soon as it has started, not when it ends.
+ * Follow it through onTransferProgress / onTransferDone. */
+export async function startTransfer(
+  id: string, paths: string[], destDir: string,
+  mode: 'copy' | 'move', conflict: ConflictChoice,
+): Promise<void> {
+  await invoke('start_transfer', { id, paths, destDir, mode, conflict })
+}
+
+export async function cancelTransfer(id: string): Promise<void> {
+  await invoke('cancel_transfer', { id })
+}
+
+export async function onTransferProgress(cb: (p: TransferProgress) => void): Promise<() => void> {
+  if (!isTauri) return () => {}
+  const { listen } = await import('@tauri-apps/api/event')
+  return listen<TransferProgress>('transfer-progress', e => cb(e.payload))
+}
+
+export async function onTransferDone(cb: (d: TransferDone) => void): Promise<() => void> {
+  if (!isTauri) return () => {}
+  const { listen } = await import('@tauri-apps/api/event')
+  return listen<TransferDone>('transfer-done', e => cb(e.payload))
 }
 
 export interface ShortcutTarget {

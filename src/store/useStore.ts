@@ -3,10 +3,12 @@ import { persist, createJSONStorage } from 'zustand/middleware'
 import { THEMES } from 'flex-design/themes/presets.js'
 import { applyTheme } from 'flex-design/runtime/theme.js'
 import type { AppState, FileEntry, Pane, PaneTab, RenameRule, OptTab, ColumnId, LayoutGroup, FolderNote, GenerationRule } from '../types'
+import type { ConflictChoice, TransferProgress, TransferDone } from '../fs/bridge'
 import { fmt, fmtDate, hashStr, uidFor, applyRules, visibleIndices } from '../utils/fileUtils'
 import {
   isTauri, isRealPath, listDir, listDrives, homeDir, launchPath, openPath, splitPath, joinPath, renamePath,
-  copyEntries, moveEntries, deleteEntries, createFolder, createNewItem as bridgeCreateNewItem, searchDir, copyText,
+  planTransfer, startTransfer, cancelTransfer as bridgeCancelTransfer, siblingFolders,
+  deleteEntries, createFolder, createNewItem as bridgeCreateNewItem, searchDir, copyText,
   shellVerb, showShellContextMenu, createShortcut, resolveShortcut, createPathShortcutText, revealInExplorer, openInTerminal, openInVscode, duplicateAsDatedCopy,
   saveWorkspace, listWorkspaces, loadWorkspace, deleteWorkspace,
   noteKey, notesLoad, notesSet, notesDelete,
@@ -79,10 +81,10 @@ export const QUICK_OPEN_CAPTURE_ID = '__quickOpenHotkey'
  * actually fire; an id listed here without one would show but do nothing. */
 const SHORTCUT_GROUPS = [
   { title: 'ナビゲーション', items: [['nav.up','上の項目へ','↑'],['nav.down','下の項目へ','↓'],['nav.parent','親フォルダへ','Alt+↑'],['nav.back','戻る','Alt+←'],['nav.forward','進む','Alt+→'],['nav.refresh','最新の情報に更新','F5'],['nav.open','開く / フォルダへ','Enter'],['nav.newtab','新しいタブ','Ctrl+T'],['nav.closetab','タブを閉じる','Ctrl+W'],['nav.address','パスを編集','Ctrl+L'],['cmd.goto','GoTo','Ctrl+G']] },
-  { title: '表示', items: [['view.inspector','Inspector を開閉','Space'],['cmd.palette','コマンドパレット','Ctrl+Shift+P'],['cmd.options','オプション','Ctrl+,'],['cmd.workspaces','ワークスペース','Ctrl+Shift+S'],['view.density','表示密度を切替','Ctrl+Shift+D'],['view.theme','テーマを切替','Ctrl+Shift+L'],['view.sidebar','サイドバーを開閉','Ctrl+B']] },
+  { title: '表示', items: [['view.inspector','Inspector を開閉','Space'],['cmd.palette','コマンドパレット','Ctrl+Shift+P'],['cmd.options','オプション','Ctrl+,'],['cmd.workspaces','ワークスペース','Ctrl+Shift+S'],['view.density','表示密度を切替','Ctrl+Shift+D'],['view.theme','テーマを切替','Ctrl+Shift+L'],['view.sidebar','サイドバーを開閉','Ctrl+B'],['view.hidden','隠しファイルを表示','Ctrl+H']] },
   { title: 'ペイン', items: [['view.split','ペインを切替','Ctrl+\\'],['pane.swap','ペインを入れ替え','Ctrl+Shift+X'],['pane.addright','右にペインを追加','Ctrl+Alt+→'],['pane.adddown','下にペインを追加','Ctrl+Alt+↓'],['pane.close','ペインを閉じる','Ctrl+Alt+X']] },
   { title: 'グループ / タブ', items: [['group.prev','前のグループへ','Ctrl+PageUp'],['group.next','次のグループへ','Ctrl+PageDown'],['group.reopen','閉じたグループを復元','Ctrl+Shift+G'],['tab.prev','前のタブへ','Ctrl+←'],['tab.next','次のタブへ','Ctrl+→'],['tab.reopen','閉じたタブを復元','Ctrl+Shift+T']] },
-  { title: '編集', items: [['edit.copy','コピー','Ctrl+C'],['edit.cut','切り取り','Ctrl+X'],['edit.paste','貼り付け','Ctrl+V'],['edit.rename','名前の変更','F2'],['edit.bulk','一括リネーム','Ctrl+Shift+R'],['edit.delete','削除','Del'],['edit.copypath','パスをコピー','Ctrl+Shift+C'],['edit.note','付箋メモ','Ctrl+M'],['edit.props','プロパティ','Alt+Enter']] },
+  { title: '編集', items: [['edit.selectall','すべて選択','Ctrl+A'],['edit.invertsel','選択を反転','Ctrl+Shift+A'],['edit.clearsel','選択を解除','Ctrl+Shift+N'],['edit.copy','コピー','Ctrl+C'],['edit.cut','切り取り','Ctrl+X'],['edit.paste','貼り付け','Ctrl+V'],['edit.rename','名前の変更','F2'],['edit.bulk','一括リネーム','Ctrl+Shift+R'],['edit.delete','削除','Del'],['edit.copypath','パスをコピー','Ctrl+Shift+C'],['edit.note','付箋メモ','Ctrl+M'],['edit.props','プロパティ','Alt+Enter']] },
   { title: '検索', items: [['find.filter','フィルタ検索','Ctrl+F'],['find.global','グローバル検索','Ctrl+Shift+F']] },
 ]
 
@@ -213,6 +215,9 @@ interface Actions {
   navBack(pi: number): void
   navForward(pi: number): void
   navBreadcrumb(pi: number, ci: number): void
+  /** Swap segment `ci` of pane `pi`'s path for `name`, keeping everything
+   * below it. Falls back to the deepest part of the tail that exists. */
+  swapPathSegment(pi: number, ci: number, name: string): Promise<void>
   navSidebar(label: string): void
   navPath(path: string, other?: boolean): void
   initTauri(): Promise<void>
@@ -221,7 +226,19 @@ interface Actions {
   copyToClip(): void
   cutToClip(): void
   paste(): Promise<void>
+  // watchable copy/move
+  beginTransfer(paths: string[], dest: string[], mode: 'copy' | 'move', srcPi: number): Promise<void>
+  runTransfer(paths: string[], dest: string[], mode: 'copy' | 'move', srcPi: number, conflict: ConflictChoice): Promise<void>
+  /** null answers the dialog with "cancel". */
+  resolveConflict(choice: ConflictChoice | null): Promise<void>
+  cancelTransfer(): void
+  onTransferTick(p: TransferProgress): void
+  onTransferDone(d: TransferDone): Promise<void>
   deleteSelected(): Promise<void>
+  /** Deletes without asking — the tail of deleteSelected / acceptConfirm. */
+  performDelete(paths: string[]): Promise<void>
+  closeConfirm(): void
+  acceptConfirm(): Promise<void>
   copyPathToClipboard(): Promise<void>
   createNewFolder(): Promise<void>
   createNewItem(kind: string): Promise<void>
@@ -233,6 +250,7 @@ interface Actions {
   runGlobalSearch(): Promise<void>
   // native shell actions
   shellProperties(): void
+  runAsAdmin(): void
   shellNew(): void
   openWith(): void
   revealInExplorer(): void
@@ -262,6 +280,10 @@ interface Actions {
   addPaneDown(): void
   closePane(pi: number): void
   moveSel(delta: number): void
+  // selection (operates on what's visible: filter + hidden-file setting)
+  selectAll(): void
+  invertSelection(): void
+  clearSelection(): void
   focusEdge(which: 'home' | 'end'): void
   typeAhead(ch: string): void
   // layout groups (Tablacus-style tabs bundling a whole pane arrangement)
@@ -393,6 +415,10 @@ let dragState: { type: string; startX: number; sidebarW: number; inspectorW: num
 // Per-pane back/forward history of path segments, namespaced by layout group id (used under Tauri).
 const histBack: Record<string, string[][]> = {}
 const histFwd: Record<string, string[][]> = {}
+
+// What the transfer in flight should refresh when it finishes. Kept beside the
+// store rather than in it because it's bookkeeping, not view state.
+let transferTargets: { srcPi: number; dirs: Set<string> } | null = null
 
 // Pane-grid track weights per layout group id. Kept alongside the store rather
 // than inside LayoutGroup so every place that stashes/restores a group doesn't
@@ -552,6 +578,9 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   quickOpen: { open: false },
   genHighlight: false,
   genRules: [],
+  transfer: null,
+  conflict: null,
+  confirm: null,
 
   setTheme: (t) => { applyTheme(t, document.documentElement); set({ theme: t, opt: { ...get().opt, theme: t } }) },
   toggleTheme: () => {
@@ -656,6 +685,30 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       const recentPaths = [abs, ...s.recentPaths.filter(rp => rp !== abs)].slice(0, 12)
       return { panes, activePane: pi, recentPaths, renaming: null }
     })
+  },
+
+  swapPathSegment: async (pi, ci, name) => {
+    const s = get()
+    const t = s.panes[pi].tabs[s.panes[pi].active]
+    const path = t.path
+    if (ci < 0 || ci >= path.length) return
+    if (path[ci] === name) return
+    const tail = path.slice(ci + 1)
+    const swapped = [...path.slice(0, ci), name, ...tail]
+    if (!isTauri) { void get().navigate(pi, swapped); return }
+    try {
+      // Ask how much of the tail the new branch actually has, and go as deep
+      // as it goes — landing on the parent beats refusing to move at all,
+      // since the missing folders are often what you're about to create.
+      const sibs = await siblingFolders(path.slice(0, ci), tail)
+      const hit = sibs.find(x => x.name === name)
+      const depth = hit ? hit.depth : 0
+      const target = [...path.slice(0, ci), name, ...tail.slice(0, depth)]
+      await get().navigate(pi, target)
+      if (depth < tail.length) {
+        get().showToast(`「${tail[depth]}」以下は存在しないため、${target[target.length - 1]} を表示しています`)
+      }
+    } catch (err) { get().showToast('移動できません: ' + String(err)) }
   },
 
   navParent: (pi) => {
@@ -797,44 +850,131 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const s = get()
     const clip = s.clip
     if (!clip || !clip.paths.length) return
-    const pi = s.activePane
     const t = activeTab(s)
     if (!isTauri || !isRealPath(t.path)) return
-    // A cut empties the source folders, so any pane showing one of them is now
-    // stale — collect them before the move and refresh them alongside the
-    // destination (a copy leaves the sources untouched, so it needs none).
-    const sourceDirs = clip.mode === 'cut'
-      ? [...new Set(clip.paths.map(p => joinPath(splitPath(p).slice(0, -1)).toLowerCase()))]
-      : []
+    await get().beginTransfer(clip.paths, t.path, clip.mode === 'copy' ? 'copy' : 'move', s.activePane)
+    if (clip.mode === 'cut') set({ clip: null })
+  },
+
+  /** Entry point for every copy/move: works out what it involves, asks about
+   * name collisions if there are any, then hands it to the transfer engine. */
+  beginTransfer: async (paths, dest, mode, srcPi) => {
+    if (!isTauri || !isRealPath(dest)) return
+    if (get().transfer) { get().showToast('別の転送が実行中です'); return }
     try {
-      const n = clip.mode === 'copy'
-        ? await copyEntries(clip.paths, t.path)
-        : await moveEntries(clip.paths, t.path)
-      if (clip.mode === 'cut') set({ clip: null })
-      await get().navigate(pi, t.path, { push: false })
-      for (const [i, pane] of get().panes.entries()) {
-        if (i === pi) continue
-        const pt = pane.tabs[pane.active]
-        if (!isRealPath(pt.path)) continue
-        if (!sourceDirs.includes(joinPath(pt.path).toLowerCase())) continue
-        await get().navigate(i, pt.path, { push: false })
+      const plan = await planTransfer(paths, joinPath(dest))
+      if (plan.conflicts.length) {
+        set({ conflict: { names: plan.conflicts, mode, paths, dest, srcPi } })
+        return
       }
-      get().showToast(`${n} 件を貼り付け`)
-    } catch (err) { get().showToast('貼り付け失敗: ' + String(err)) }
+      await get().runTransfer(paths, dest, mode, srcPi, 'keepboth')
+    } catch (err) { get().showToast('転送を開始できません: ' + String(err)) }
+  },
+
+  resolveConflict: async (choice) => {
+    const c = get().conflict
+    if (!c) return
+    set({ conflict: null })
+    if (!choice) return
+    await get().runTransfer(c.paths, c.dest, c.mode, c.srcPi, choice)
+  },
+
+  runTransfer: async (paths, dest, mode, srcPi, conflict) => {
+    const id = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+    // Remember what to refresh: the destination, plus the source folders when
+    // this is a move (a copy leaves them untouched).
+    transferTargets = {
+      srcPi,
+      dirs: new Set([
+        joinPath(dest).toLowerCase(),
+        ...(mode === 'move' ? paths.map(p => joinPath(splitPath(p).slice(0, -1)).toLowerCase()) : []),
+      ]),
+    }
+    set({ transfer: { id, mode, done: 0, total: 0, bytesDone: 0, bytesTotal: 0, current: '' } })
+    try {
+      await startTransfer(id, paths, joinPath(dest), mode, conflict)
+    } catch (err) {
+      set({ transfer: null })
+      get().showToast('転送を開始できません: ' + String(err))
+    }
+  },
+
+  cancelTransfer: () => {
+    const t = get().transfer
+    if (t) void bridgeCancelTransfer(t.id)
+  },
+
+  /** Fed by the `transfer-progress` event (subscribed in App.tsx). */
+  onTransferTick: (p) => set(st => (st.transfer && st.transfer.id === p.id
+    ? { transfer: { ...st.transfer, done: p.done, total: p.total, bytesDone: p.bytesDone, bytesTotal: p.bytesTotal, current: p.current } }
+    : {})),
+
+  /** Fed by the `transfer-done` event. */
+  onTransferDone: async (d) => {
+    if (get().transfer?.id !== d.id) return
+    set({ transfer: null })
+    const targets = transferTargets
+    transferTargets = null
+    // Refresh every pane that was showing either end of the transfer.
+    for (const [i, pane] of get().panes.entries()) {
+      const pt = pane.tabs[pane.active]
+      if (!isRealPath(pt.path)) continue
+      if (!targets?.dirs.has(joinPath(pt.path).toLowerCase()) && i !== targets?.srcPi) continue
+      await get().navigate(i, pt.path, { push: false })
+    }
+    if (d.cancelled) { get().showToast('転送を中止しました'); return }
+    if (d.errors.length) {
+      get().showToast(`${d.ok} 件完了 / ${d.errors.length} 件失敗: ${d.errors[0]}`)
+      return
+    }
+    const skipped = d.skipped ? ` (${d.skipped} 件スキップ)` : ''
+    get().showToast(`${d.ok} 件を${get().transfer?.mode === 'copy' ? 'コピー' : '転送'}しました${skipped}`)
   },
 
   deleteSelected: async () => {
     const s = get()
-    const pi = s.activePane
     const t = activeTab(s)
     const paths = selectedAbs(t)
     if (!paths.length) return
     if (!isTauri || !isRealPath(t.path)) { get().showToast('削除: ごみ箱へ移動'); return }
+    // 設定 > デフォルト動作 > 削除前に確認. The toggle existed from the start but
+    // was never wired to anything, so Del went straight to the recycle bin.
+    if (s.adv.confirmDelete) {
+      const names = paths.map(p => splitPath(p).slice(-1)[0])
+      set({
+        confirm: {
+          kind: 'delete',
+          paths,
+          title: 'ごみ箱へ移動しますか？',
+          okLabel: 'ごみ箱へ移動',
+          body: names.length === 1
+            ? names[0]
+            : [`${names.length} 個の項目`, '', ...names.slice(0, 8),
+               ...(names.length > 8 ? [`… 他 ${names.length - 8} 件`] : [])].join(String.fromCharCode(10)),
+        },
+      })
+      return
+    }
+    await get().performDelete(paths)
+  },
+
+  performDelete: async (paths) => {
+    const pi = get().activePane
+    const t = activeTab(get())
     try {
       const n = await deleteEntries(paths, false)
       await get().navigate(pi, t.path, { push: false })
       get().showToast(`${n} 件をごみ箱へ移動`)
     } catch (err) { get().showToast('削除失敗: ' + String(err)) }
+  },
+
+  closeConfirm: () => set({ confirm: null }),
+
+  acceptConfirm: async () => {
+    const c = get().confirm
+    if (!c) return
+    set({ confirm: null })
+    if (c.kind === 'delete') await get().performDelete(c.paths)
   },
 
   copyPathToClipboard: async () => {
@@ -913,6 +1053,15 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       })
       get().showToast(`${files.length} 件ヒット`)
     } catch (err) { get().showToast('検索失敗: ' + String(err)) }
+  },
+
+  /** Runs the focused item elevated, via the shell's own "runas" verb — the
+   * UAC prompt is Windows', so nothing here handles credentials. */
+  runAsAdmin: () => {
+    const abs = focusedAbs(activeTab(get()))
+    if (!abs) return
+    if (!isTauri) { get().showToast('管理者として実行'); return }
+    shellVerb(abs, 'runas').catch(err => get().showToast('管理者として実行できません: ' + String(err)))
   },
 
   shellProperties: () => {
@@ -1008,30 +1157,13 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (!paths.length) return
     if (!isTauri || !isRealPath(destPath)) return
     const dest = joinPath(destPath).toLowerCase()
-    // Dropping something onto the folder it already sits in, or onto itself,
-    // is a no-op rather than an error — same rule as paste.
-    const targets = paths.filter(p => {
-      const low = p.toLowerCase()
-      if (low === dest) return false
-      return joinPath(splitPath(p).slice(0, -1)).toLowerCase() !== dest || mode === 'copy'
-    })
+    // Dropping something onto the folder it already sits in is a no-op when
+    // moving; when copying it makes a numbered duplicate, as in Explorer.
+    const targets = mode === 'move'
+      ? paths.filter(p => joinPath(splitPath(p).slice(0, -1)).toLowerCase() !== dest && p.toLowerCase() !== dest)
+      : paths
     if (!targets.length) return
-    try {
-      const n = mode === 'copy'
-        ? await copyEntries(targets, destPath)
-        : await moveEntries(targets, destPath)
-      // Refresh every pane showing either end of the operation: the destination
-      // gained entries, and a move emptied the source.
-      const dirty = new Set([dest])
-      if (mode === 'move') targets.forEach(p => dirty.add(joinPath(splitPath(p).slice(0, -1)).toLowerCase()))
-      for (const [i, pane] of get().panes.entries()) {
-        const t = pane.tabs[pane.active]
-        if (!isRealPath(t.path)) continue
-        if (!dirty.has(joinPath(t.path).toLowerCase()) && i !== srcPi) continue
-        await get().navigate(i, t.path, { push: false })
-      }
-      get().showToast(`${n} 件を${mode === 'copy' ? 'コピー' : '移動'}しました`)
-    } catch (err) { get().showToast((mode === 'copy' ? 'コピー' : '移動') + '失敗: ' + String(err)) }
+    await get().beginTransfer(targets, destPath, mode, srcPi)
   },
 
   showOsContextMenuForSel: async (x, y) => {
@@ -1507,10 +1639,37 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     return { panes }
   }),
 
+  selectAll: () => set(s => {
+    const panes = clonePanes(s.panes); const p = panes[s.activePane]; const t = p.tabs[p.active]
+    // Only what's on screen: a filtered-out or hidden row isn't something the
+    // user can see, so "select all" must not quietly include it.
+    const vis = visibleIndices(t, s.searchMode === 'filter' ? s.search : '', s.adv.hidden)
+    if (!vis.length) return {}
+    t.sel = vis
+    if (!vis.includes(t.focus)) t.focus = vis[0]
+    return { panes }
+  }),
+
+  invertSelection: () => set(s => {
+    const panes = clonePanes(s.panes); const p = panes[s.activePane]; const t = p.tabs[p.active]
+    const vis = visibleIndices(t, s.searchMode === 'filter' ? s.search : '', s.adv.hidden)
+    const had = new Set(t.sel)
+    const sel = vis.filter(i => !had.has(i))
+    t.sel = sel
+    if (sel.length && !sel.includes(t.focus)) t.focus = sel[0]
+    return { panes }
+  }),
+
+  clearSelection: () => set(s => {
+    const panes = clonePanes(s.panes); const p = panes[s.activePane]; const t = p.tabs[p.active]
+    t.sel = []
+    return { panes }
+  }),
+
   moveSel: (delta) => set(s => {
     const panes = clonePanes(s.panes); const p = panes[s.activePane]; const t = p.tabs[p.active]
     const q = s.searchMode === 'filter' ? s.search : ''
-    const vis = visibleIndices(t, q)
+    const vis = visibleIndices(t, q, s.adv.hidden)
     if (!vis.length) return {}
     let pos = vis.indexOf(t.focus); if (pos < 0) pos = 0
     pos = Math.max(0, Math.min(vis.length - 1, pos + delta))
@@ -1521,7 +1680,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   focusEdge: (which) => set(s => {
     const panes = clonePanes(s.panes); const p = panes[s.activePane]; const t = p.tabs[p.active]
     const q = s.searchMode === 'filter' ? s.search : ''
-    const vis = visibleIndices(t, q)
+    const vis = visibleIndices(t, q, s.adv.hidden)
     if (!vis.length) return {}
     const idx = which === 'home' ? vis[0] : vis[vis.length - 1]
     t.focus = idx; t.sel = [idx]
@@ -1532,7 +1691,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const s = get()
     const p = s.panes[s.activePane]; const t = p.tabs[p.active]
     const q = s.searchMode === 'filter' ? s.search : ''
-    const vis = visibleIndices(t, q)
+    const vis = visibleIndices(t, q, s.adv.hidden)
     if (!vis.length) return
     const now = Date.now()
     const within = now - typeAheadTime < 800

@@ -14,7 +14,8 @@ import WorkspacesModal from './components/modals/WorkspacesModal'
 import CommandPalette from './components/overlays/CommandPalette'
 import GoToOverlay from './components/overlays/GoToOverlay'
 import QuickOpenOverlay from './components/overlays/QuickOpenOverlay'
-import { onOpenInTmpPane } from './fs/bridge'
+import { ConfirmDialog, ConflictDialog, TransferProgressBar } from './components/overlays/TransferOverlays'
+import { onOpenInTmpPane, onTransferProgress, onTransferDone } from './fs/bridge'
 import { comboOf, runBinding } from './keys'
 
 export default function App() {
@@ -48,6 +49,15 @@ export default function App() {
     return () => unlisten?.()
   }, [])
 
+  // Copy/move runs in a background thread on the Rust side and reports back
+  // through these two events (see src-tauri/src/transfer.rs).
+  useEffect(() => {
+    const un: Array<() => void> = []
+    void onTransferProgress(p => useStore.getState().onTransferTick(p)).then(u => un.push(u))
+    void onTransferDone(d => void useStore.getState().onTransferDone(d)).then(u => un.push(u))
+    return () => un.forEach(u => u())
+  }, [])
+
   // Track pane container width for responsive columns
   useEffect(() => {
     const el = panesRef.current
@@ -76,6 +86,8 @@ export default function App() {
         useStore.getState().closePalette()
         useStore.getState().closeGoto()
         useStore.getState().closeQuickOpen()
+        useStore.getState().closeConfirm()
+        void useStore.getState().resolveConflict(null)
         useStore.getState().closeModal()
         return
       }
@@ -91,6 +103,7 @@ export default function App() {
 
       // Everything else stays out of the way of modals, overlays and inputs.
       if (modal || paletteOpen || gotoOpen || quickOpenOpen || inInput) return
+      if (useStore.getState().confirm || useStore.getState().conflict) return
 
       // Ctrl+1…9 selects the nth tab of the active pane (fixed, not rebindable —
       // it's a family of ten combos rather than one action).
@@ -172,6 +185,9 @@ export default function App() {
       <CommandPalette />
       <GoToOverlay />
       <QuickOpenOverlay />
+      <ConfirmDialog />
+      <ConflictDialog />
+      <TransferProgressBar />
     </div>
   )
 }

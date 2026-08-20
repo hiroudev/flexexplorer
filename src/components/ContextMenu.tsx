@@ -65,6 +65,9 @@ export default function ContextMenu() {
   const createShortcutForSel = useStore(s => s.createShortcutForSel)
   const createPathShortcutTextForSel = useStore(s => s.createPathShortcutTextForSel)
   const createShortcutForFolder = useStore(s => s.createShortcutForFolder)
+  const selectAll = useStore(s => s.selectAll)
+  const invertSelection = useStore(s => s.invertSelection)
+  const runAsAdmin = useStore(s => s.runAsAdmin)
   const showOsContextMenuForSel = useStore(s => s.showOsContextMenuForSel)
   const createNewItem = useStore(s => s.createNewItem)
   const duplicateSelectedAsDatedCopy = useStore(s => s.duplicateSelectedAsDatedCopy)
@@ -116,6 +119,9 @@ export default function ContextMenu() {
     items.push({ divider: true })
     items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); if (clip) void paste() } })
     items.push({ divider: true })
+    items.push({ divider: true })
+    items.push({ icon: '☑', iconColor: 'var(--text-muted)', label: 'すべて選択', key: 'Ctrl+A', onClick: () => { closeCtx(); selectAll() } })
+    items.push({ icon: '☒', iconColor: 'var(--text-muted)', label: '選択を反転', key: 'Ctrl+Shift+A', onClick: () => { closeCtx(); invertSelection() } })
     items.push({ divider: true })
     // Same pair as the item menu, but aimed at the folder being shown — the
     // text variant records this folder's own path (see createShortcutForFolder).
@@ -178,6 +184,7 @@ export default function ContextMenu() {
     }
     items.push({ icon: '⋯', iconColor: 'var(--text-muted)', label: 'その他のアクション', key: '', arrow: true, subId: 'more', onClick: () => openSub('more') })
     items.push({ divider: true })
+    if (!multi) items.push({ icon: '🛡', iconColor: 'var(--warn)', label: '管理者として実行', key: '', onClick: () => { closeCtx(); runAsAdmin() } })
     items.push({ icon: 'ℹ', iconColor: 'var(--text-muted)', label: 'プロパティ', key: 'Alt+Enter', onClick: () => { closeCtx(); shellProperties() } })
   }
 

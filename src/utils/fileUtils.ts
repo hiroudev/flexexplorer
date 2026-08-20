@@ -33,10 +33,11 @@ export function splitName(file: FileEntry): { base: string; ext: string } {
   return { base: file.name, ext: '' }
 }
 
-export function visibleIndices(tab: PaneTab, search: string): number[] {
+export function visibleIndices(tab: PaneTab, search: string, showHidden = true): number[] {
   const q = search.trim().toLowerCase()
   const out: number[] = []
   tab.files.forEach((f, i) => {
+    if (f.hidden && !showHidden) return
     if (!q || f.name.toLowerCase().includes(q)) out.push(i)
   })
   const key = tab.sortKey
