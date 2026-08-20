@@ -257,8 +257,10 @@ pub fn read_xlsx_preview(path: String, max_rows: usize, max_cols: usize) -> Resu
             out.push('…');
             break;
         }
+        // Tab-separated, not " | " — the inspector shows raw cell values, and a
+        // pipe reads as a table rule that isn't in the sheet.
         let line: Vec<String> = row.iter().take(cols).map(cell_text).collect();
-        out.push_str(&line.join(" | "));
+        out.push_str(line.join("	").trim_end());
         out.push('\n');
     }
     Ok(out)
@@ -287,6 +289,15 @@ pub fn rename_path(from: String, to: String) -> Result<String, String> {
 
 /// Pick a non-colliding target path by inserting " (2)", " (3)", … before the
 /// extension when the desired path already exists.
+/// Whether two paths denote the same existing entry — compared canonically so
+/// differing case, trailing separators, or `.`/`..` segments don't fool it.
+fn same_entry(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
 pub(crate) fn unique_target(desired: &Path) -> PathBuf {
     if !desired.exists() {
         return desired.to_path_buf();
@@ -339,7 +350,14 @@ pub fn copy_entries(paths: Vec<String>, dest_dir: String) -> Result<u32, String>
     for p in &paths {
         let src = PathBuf::from(p);
         let name = src.file_name().ok_or_else(|| format!("invalid source: {p}"))?;
-        let target = unique_target(&dest.join(name));
+        let desired = dest.join(name);
+        // Moving an entry into the folder it already lives in is a no-op, not a
+        // reason to make a "(2)" duplicate — that only applies to a real name
+        // collision with a *different* entry (see `unique_target`).
+        if same_entry(&src, &desired) {
+            continue;
+        }
+        let target = unique_target(&desired);
         copy_recursive(&src, &target).map_err(|e| e.to_string())?;
         n += 1;
     }
@@ -354,7 +372,14 @@ pub fn move_entries(paths: Vec<String>, dest_dir: String) -> Result<u32, String>
     for p in &paths {
         let src = PathBuf::from(p);
         let name = src.file_name().ok_or_else(|| format!("invalid source: {p}"))?;
-        let target = unique_target(&dest.join(name));
+        let desired = dest.join(name);
+        // Moving an entry into the folder it already lives in is a no-op, not a
+        // reason to make a "(2)" duplicate — that only applies to a real name
+        // collision with a *different* entry (see `unique_target`).
+        if same_entry(&src, &desired) {
+            continue;
+        }
+        let target = unique_target(&desired);
         // Fast path: same-volume rename. Fall back to copy + delete across volumes.
         if std::fs::rename(&src, &target).is_err() {
             copy_recursive(&src, &target).map_err(|e| e.to_string())?;

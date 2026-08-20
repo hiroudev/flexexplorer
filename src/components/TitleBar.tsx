@@ -21,6 +21,7 @@ function SearchBox() {
         <span style={{ position: 'absolute', left: 7, top: 7, width: 4.5, height: 1.4, background: 'var(--text-faint)', transform: 'rotate(45deg)', transformOrigin: 'left' }} />
       </span>
       <input
+        data-search-input
         value={search}
         onChange={e => setSearch(e.target.value)}
         onFocus={() => setFocus(true)}

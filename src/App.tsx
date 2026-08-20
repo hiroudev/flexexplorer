@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
-import { useStore } from './store/useStore'
+import React, { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useStore, rowCount } from './store/useStore'
 import TitleBar from './components/TitleBar'
 import ToolBar from './components/ToolBar'
 import SideBar from './components/SideBar'
@@ -15,28 +15,19 @@ import CommandPalette from './components/overlays/CommandPalette'
 import GoToOverlay from './components/overlays/GoToOverlay'
 import QuickOpenOverlay from './components/overlays/QuickOpenOverlay'
 import { onOpenInTmpPane } from './fs/bridge'
+import { comboOf, runBinding } from './keys'
 
 export default function App() {
-  const panes = useStore(s => s.panes)
-  const gridCols = useStore(s => s.gridCols)
-  const pane0Pct = useStore(s => s.pane0Pct)
-  const startSplitDrag = useStore(s => s.startSplitDrag)
   const dragMove = useStore(s => s.dragMove)
   const dragEnd = useStore(s => s.dragEnd)
   const setContainerW = useStore(s => s.setContainerW)
-  const openModal = useStore(s => s.openModal)
-  const openPalette = useStore(s => s.openPalette)
-  const openGoto = useStore(s => s.openGoto)
-  const toggleInspector = useStore(s => s.toggleInspector)
-  const toggleSidebar = useStore(s => s.toggleSidebar)
-  const toggleTheme = useStore(s => s.toggleTheme)
-  const moveSel = useStore(s => s.moveSel)
   const closeCtx = useStore(s => s.closeCtx)
   const modal = useStore(s => s.modal)
   const paletteOpen = useStore(s => s.palette.open)
   const gotoOpen = useStore(s => s.goto.open)
   const quickOpenOpen = useStore(s => s.quickOpen.open)
   const accent = useStore(s => s.opt.accent)
+  const binds = useStore(s => s.binds)
 
   const panesRef = useRef<HTMLDivElement>(null)
 
@@ -68,13 +59,18 @@ export default function App() {
     return () => obs.disconnect()
   }, [setContainerW])
 
-  // Global keyboard handler
+  // Global keyboard handler.
+  //
+  // Bindable actions are dispatched through `binds` (Options > ショートカット)
+  // rather than matched here, so rebinding one actually takes effect — see
+  // keys.ts. What stays hard-coded below is the set that isn't rebindable:
+  // list movement, type-ahead, and the Esc/Tab conventions.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (document.activeElement as HTMLElement)?.tagName
       const inInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
 
-      // Always-active shortcuts
+      // Escape closes whatever is on top, wherever focus is.
       if (e.key === 'Escape') {
         closeCtx()
         useStore.getState().closePalette()
@@ -84,74 +80,35 @@ export default function App() {
         return
       }
 
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'P') {
-        e.preventDefault(); openPalette(); return
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === ',') {
-        e.preventDefault(); openModal('options'); return
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'g') {
-        e.preventDefault(); openGoto(); return
-      }
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'S') {
-        e.preventDefault(); openModal('workspaces'); return
+      const combo = comboOf(e)
+
+      // These few reach in from anywhere, including from inside a text field,
+      // because they're how you get *out* to another surface.
+      if (combo && (combo === binds['cmd.palette'] || combo === binds['cmd.options'] ||
+          combo === binds['cmd.goto'] || combo === binds['cmd.workspaces'])) {
+        e.preventDefault(); runBinding(combo, binds, useStore); return
       }
 
-      // Skip navigation shortcuts when in modals/palette/goto
+      // Everything else stays out of the way of modals, overlays and inputs.
       if (modal || paletteOpen || gotoOpen || quickOpenOpen || inInput) return
 
-      if (e.key === ' ') { e.preventDefault(); toggleInspector(); return }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'b') { e.preventDefault(); toggleSidebar(); return }
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'L') { e.preventDefault(); toggleTheme(); return }
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'R') { e.preventDefault(); openModal('rename'); return }
+      // Ctrl+1…9 selects the nth tab of the active pane (fixed, not rebindable —
+      // it's a family of ten combos rather than one action).
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && /^[1-9]$/.test(e.key)) {
+        e.preventDefault()
+        const s0 = useStore.getState()
+        const ti = Number(e.key) - 1
+        if (ti < s0.panes[s0.activePane].tabs.length) s0.switchTab(s0.activePane, ti)
+        return
+      }
 
-      // Switch the active pane (dual-pane file-manager convention: Tab / Shift+Tab).
-      if (e.key === 'Tab') { e.preventDefault(); useStore.getState().cyclePane(e.shiftKey ? -1 : 1); return }
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'X' || e.key === 'x')) { e.preventDefault(); useStore.getState().swapPanes(); return }
-      // Pane grid (Ctrl+Alt+…)
-      if ((e.ctrlKey || e.metaKey) && e.altKey && e.key === 'ArrowRight') { e.preventDefault(); useStore.getState().addPaneRight(); return }
-      if ((e.ctrlKey || e.metaKey) && e.altKey && e.key === 'ArrowDown') { e.preventDefault(); useStore.getState().addPaneDown(); return }
-      if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'x' || e.key === 'X')) { e.preventDefault(); useStore.getState().closePane(useStore.getState().activePane); return }
-      // Layout groups: Ctrl+←/→ steps through the toolbar's group tabs.
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); useStore.getState().cycleLayoutGroup(-1); return }
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === 'ArrowRight') { e.preventDefault(); useStore.getState().cycleLayoutGroup(1); return }
-
-      if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); useStore.getState().navParent(useStore.getState().activePane); return }
-      if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); useStore.getState().navBack(useStore.getState().activePane); return }
-      if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); useStore.getState().navForward(useStore.getState().activePane); return }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'l' || e.key === 'L')) { e.preventDefault(); useStore.getState().startAddressEdit(useStore.getState().activePane); return }
-      if (e.key === 'F4') { e.preventDefault(); useStore.getState().startAddressEdit(useStore.getState().activePane); return }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'm' || e.key === 'M')) { e.preventDefault(); useStore.getState().addNote(); return }
-      if (e.key === 'ArrowDown') { e.preventDefault(); moveSel(1); return }
-      if (e.key === 'ArrowUp') { e.preventDefault(); moveSel(-1); return }
+      if (combo && runBinding(combo, binds, useStore)) { e.preventDefault(); return }
 
       const st = useStore.getState()
       const ap = st.activePane
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'C' || e.key === 'c')) { e.preventDefault(); void st.copyPathToClipboard(); return }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'c')) { e.preventDefault(); st.copyToClip(); return }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'x')) { e.preventDefault(); st.cutToClip(); return }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'v')) { e.preventDefault(); void st.paste(); return }
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) { e.preventDefault(); st.reopenClosedTab(); return }
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'G' || e.key === 'g')) { e.preventDefault(); st.reopenClosedLayoutGroup(); return }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 't')) { e.preventDefault(); st.newTab(ap); return }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'w')) { e.preventDefault(); st.closeTab(ap, st.panes[ap].active); return }
-      if (e.key === 'Delete') { e.preventDefault(); void st.deleteSelected(); return }
-      if (e.key === 'F2') {
-        e.preventDefault()
-        // A single selected item renames inline in the list; a multi-selection
-        // goes to the bulk-rename tool (F2's Explorer meaning has no bulk case).
-        const tab = st.panes[ap].tabs[st.panes[ap].active]
-        if (tab.sel.length === 1) st.startRename(ap, tab.sel[0])
-        else st.openModal('rename')
-        return
-      }
-      if (e.altKey && e.key === 'Enter') { e.preventDefault(); st.shellProperties(); return }
-      if (e.key === 'Enter') {
-        e.preventDefault()
-        const tab = st.panes[ap].tabs[st.panes[ap].active]
-        st.openFile(ap, tab.focus)
-        return
-      }
+      // Switch the active pane (dual-pane file-manager convention: Tab / Shift+Tab).
+      if (e.key === 'Tab') { e.preventDefault(); st.cyclePane(e.shiftKey ? -1 : 1); return }
+      if (e.key === 'F4') { e.preventDefault(); st.startAddressEdit(ap); return }
       if (e.key === 'Home') { e.preventDefault(); st.focusEdge('home'); return }
       if (e.key === 'End') { e.preventDefault(); st.focusEdge('end'); return }
       // Type-ahead: jump to entries by typed prefix (Explorer-style).
@@ -163,11 +120,11 @@ export default function App() {
 
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [modal, paletteOpen, gotoOpen, quickOpenOpen, closeCtx, openPalette, openModal, openGoto, toggleInspector, toggleSidebar, toggleTheme, moveSel])
+  }, [modal, paletteOpen, gotoOpen, quickOpenOpen, binds, closeCtx])
 
   // Mouse drag events
   useEffect(() => {
-    const onMove = (e: MouseEvent) => dragMove(e.clientX)
+    const onMove = (e: MouseEvent) => dragMove(e.clientX, e.clientY)
     const onUp = () => dragEnd()
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
@@ -192,35 +149,13 @@ export default function App() {
 
         {/* Panes + Inspector */}
         <div style={{ flex: 1, display: 'flex', minWidth: 0, overflow: 'hidden' }}>
-          {/* File panes: a plain 2-up split gets an adjustable divider (drags pane0Pct);
-              any other layout (3+ panes, or a 2x2 grid) falls back to the equal-width CSS grid. */}
-          {panes.length === 2 && gridCols === 2 ? (
-            <div
-              ref={panesRef}
-              data-panes
-              style={{ flex: 1, display: 'flex', padding: 8, gap: 0, minWidth: 0, minHeight: 0, overflow: 'hidden' }}
-            >
-              <div style={{ width: `calc(${pane0Pct}% - 4px)`, minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
-                <FilePane key={0} pane={panes[0]} pi={0} spanCols={1} />
-              </div>
-              <PaneSplitHandle onMouseDown={e => { e.preventDefault(); startSplitDrag(e.clientX, panesRef.current?.clientWidth ?? 800) }} />
-              <div style={{ width: `calc(${100 - pane0Pct}% - 4px)`, minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
-                <FilePane key={1} pane={panes[1]} pi={1} spanCols={1} />
-              </div>
-            </div>
-          ) : (
-            <div
-              ref={panesRef}
-              data-panes
-              style={{ flex: 1, display: 'grid', gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))`, gridAutoRows: 'minmax(0, 1fr)', gap: 8, padding: 8, minWidth: 0, minHeight: 0, overflow: 'hidden' }}
-            >
-              {panes.map((pane, pi) => {
-                const rem = panes.length % gridCols
-                const span = (pi === panes.length - 1 && rem !== 0) ? gridCols - rem + 1 : 1
-                return <FilePane key={pi} pane={pane} pi={pi} spanCols={span} />
-              })}
-            </div>
-          )}
+          {/* File panes.
+              One CSS grid whose column/row weights the user can drag. The
+              splitters live in their own gutter tracks and span the whole grid
+              (a column splitter covers every row, a row splitter every column),
+              so moving one boundary never staggers the panes either side of it
+              — the pane edges stay on one straight line by construction. */}
+          <PaneGrid panesRef={panesRef} />
 
           <Inspector />
         </div>
@@ -241,16 +176,107 @@ export default function App() {
   )
 }
 
-function PaneSplitHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
+const GUTTER = 8
+
+/** The resizable pane grid: `gridCols` columns × as many rows as the panes
+ * need, with a draggable gutter track between every pair of tracks. */
+function PaneGrid({ panesRef }: { panesRef: React.RefObject<HTMLDivElement | null> }) {
+  const panes = useStore(s => s.panes)
+  const gridCols = useStore(s => s.gridCols)
+  const colFracs = useStore(s => s.colFracs)
+  const rowFracs = useStore(s => s.rowFracs)
+  const startTrackDrag = useStore(s => s.startTrackDrag)
+
+  const cols = Math.max(1, gridCols)
+  const rows = rowCount(panes.length, cols)
+  // Stored weights can lag the pane count by a render (a pane was just added or
+  // closed); pad/trim so the template always has exactly the right track count.
+  const cf = fitLocal(colFracs, cols)
+  const rf = fitLocal(rowFracs, rows)
+
+  // "1fr 8px 2fr" — data tracks at even indices, gutters at odd ones.
+  const template = (fr: number[]) => fr.map(f => `${f}fr`).join(` ${GUTTER}px `)
+
+  const beginDrag = (axis: 'col' | 'row', index: number) => (e: React.MouseEvent) => {
+    e.preventDefault()
+    const el = panesRef.current
+    if (!el) return
+    const total = axis === 'col'
+      ? el.clientWidth - GUTTER * (cols - 1)
+      : el.clientHeight - GUTTER * (rows - 1)
+    startTrackDrag(axis, index, axis === 'col' ? e.clientX : e.clientY, Math.max(1, total))
+  }
+
+  return (
+    <div
+      ref={panesRef as React.RefObject<HTMLDivElement>}
+      data-panes
+      style={{
+        flex: 1, display: 'grid', padding: 8, minWidth: 0, minHeight: 0, overflow: 'hidden',
+        gridTemplateColumns: template(cf),
+        gridTemplateRows: template(rf),
+      }}
+    >
+      {panes.map((pane, pi) => {
+        const r = Math.floor(pi / cols)
+        const c = pi % cols
+        // A final row that doesn't fill its columns lets the last pane stretch
+        // across the leftovers, gutters included.
+        const rem = panes.length % cols
+        const span = (pi === panes.length - 1 && rem !== 0) ? cols - rem + 1 : 1
+        return (
+          <div
+            key={pi}
+            style={{
+              gridColumn: `${c * 2 + 1} / span ${span * 2 - 1}`,
+              gridRow: `${r * 2 + 1}`,
+              minWidth: 0, minHeight: 0, overflow: 'hidden',
+            }}
+          >
+            <FilePane pane={pane} pi={pi} spanCols={span} />
+          </div>
+        )
+      })}
+
+      {Array.from({ length: cols - 1 }, (_, i) => (
+        <TrackHandle key={'c' + i} axis="col" style={{ gridColumn: (i + 1) * 2, gridRow: '1 / -1' }} onMouseDown={beginDrag('col', i)} />
+      ))}
+      {Array.from({ length: rows - 1 }, (_, i) => (
+        <TrackHandle key={'r' + i} axis="row" style={{ gridRow: (i + 1) * 2, gridColumn: '1 / -1' }} onMouseDown={beginDrag('row', i)} />
+      ))}
+    </div>
+  )
+}
+
+/** Local mirror of the store's `fitFracs` for render-time safety. */
+function fitLocal(fr: number[], n: number): number[] {
+  if (fr.length === n) return fr
+  return Array.from({ length: n }, (_, i) => (fr[i] > 0 ? fr[i] : 1))
+}
+
+function TrackHandle({ axis, style, onMouseDown }: { axis: 'col' | 'row'; style: CSSProperties; onMouseDown: (e: React.MouseEvent) => void }) {
   const [hover, setHover] = useState(false)
+  const vertical = axis === 'col'
   return (
     <div
       onMouseDown={onMouseDown}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      style={{ flex: '0 0 8px', width: 8, cursor: 'col-resize', display: 'flex', justifyContent: 'center' }}
+      style={{
+        ...style,
+        zIndex: 1,
+        cursor: vertical ? 'col-resize' : 'row-resize',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
     >
-      <div style={{ width: 2, height: '100%', borderRadius: 1, background: hover ? 'var(--accent)' : 'transparent', transition: 'background .1s' }} />
+      <div style={{
+        background: hover ? 'var(--accent)' : 'transparent',
+        borderRadius: 1,
+        transition: 'background .1s',
+        ...(vertical ? { width: 2, height: '100%' } : { height: 2, width: '100%' }),
+      }} />
     </div>
   )
 }

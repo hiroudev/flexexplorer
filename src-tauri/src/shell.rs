@@ -2,6 +2,7 @@
 //! Explorer's real behaviour (Properties dialog, "Open with", shortcut, …).
 
 use serde::Serialize;
+use std::path::Path;
 
 /// Where a `.lnk` shortcut points, and whether that's a folder — so the
 /// frontend can navigate to it directly instead of falling through to
@@ -50,10 +51,16 @@ pub fn shell_verb(path: String, verb: String) -> Result<(), String> {
 /// correctly through a normal Windows shortcut) — it's not a functional
 /// shortcut (double-clicking it won't navigate anywhere), just the path
 /// recorded as text so it can be copied/pasted into the address bar.
+/// `dest_dir` overrides where the file is written; without it the shortcut
+/// lands next to `target`. The folder-level menu passes the folder itself as
+/// both target and destination, so the shortcut ends up *inside* it.
 #[tauri::command]
-pub fn create_path_shortcut_text(target: String) -> Result<String, String> {
+pub fn create_path_shortcut_text(target: String, dest_dir: Option<String>) -> Result<String, String> {
     let tpath = std::path::Path::new(&target);
-    let dir = tpath.parent().ok_or("親フォルダを取得できません")?;
+    let dir: &Path = match dest_dir.as_deref() {
+        Some(d) => Path::new(d),
+        None => tpath.parent().ok_or("親フォルダを取得できません")?,
+    };
     let name = tpath
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -97,14 +104,14 @@ pub fn duplicate_as_dated_copy(path: String) -> Result<String, String> {
 
 /// Create a `.lnk` shortcut to `target` in its own folder. Returns the path.
 #[tauri::command]
-pub fn create_shortcut(target: String) -> Result<String, String> {
+pub fn create_shortcut(target: String, dest_dir: Option<String>) -> Result<String, String> {
     #[cfg(windows)]
     {
-        win::create_shortcut(&target)
+        win::create_shortcut(&target, dest_dir.as_deref())
     }
     #[cfg(not(windows))]
     {
-        let _ = target;
+        let _ = (target, dest_dir);
         Err("shortcuts are only available on Windows".into())
     }
 }
@@ -259,9 +266,12 @@ mod win {
         first
     }
 
-    pub fn create_shortcut(target: &str) -> Result<String, String> {
+    pub fn create_shortcut(target: &str, dest_dir: Option<&str>) -> Result<String, String> {
         let tpath = PathBuf::from(target);
-        let dir = tpath.parent().ok_or("invalid target")?.to_path_buf();
+        let dir = match dest_dir {
+            Some(d) => PathBuf::from(d),
+            None => tpath.parent().ok_or("invalid target")?.to_path_buf(),
+        };
         let stem = tpath
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -275,7 +285,8 @@ mod win {
                     CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| e.to_string())?;
                 let wtarget = wide(target);
                 link.SetPath(PCWSTR(wtarget.as_ptr())).map_err(|e| e.to_string())?;
-                let wdir = wide(&dir.to_string_lossy());
+                let workdir = tpath.parent().unwrap_or(&dir).to_string_lossy().to_string();
+                let wdir = wide(&workdir);
                 let _ = link.SetWorkingDirectory(PCWSTR(wdir.as_ptr()));
                 let persist: IPersistFile = link.cast().map_err(|e| e.to_string())?;
                 let wlnk = wide(&lnk.to_string_lossy());

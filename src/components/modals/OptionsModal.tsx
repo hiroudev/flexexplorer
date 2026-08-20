@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore, QUICK_OPEN_CAPTURE_ID } from '../../store/useStore'
 import type { OptTab, AppearanceOptions } from '../../types'
 import { THEME_LIST, THEMES } from 'flex-design/themes/presets.js'
@@ -7,6 +7,8 @@ import { loadCustomThemes, saveCustomTheme, deleteCustomTheme } from 'flex-desig
 import { parseFlexThemeFile, serializeFlexThemeFile } from 'flex-design/theme-forge/schema.js'
 import { ThemePreview } from 'flex-design/components'
 import ThemeDesignerModal from './ThemeDesignerModal'
+import { comboOf, isModifierKey } from '../../keys'
+import { previewGroups } from '../../utils/generations'
 
 function downloadJson(filename: string, json: string) {
   const blob = new Blob([json], { type: 'application/json' })
@@ -22,6 +24,7 @@ const NAV: { id: OptTab; label: string; icon: string }[] = [
   { id: 'appearance', label: '外観', icon: '◑' },
   { id: 'shortcuts', label: 'ショートカット', icon: '⌨' },
   { id: 'files', label: 'ファイル表示', icon: '👁' },
+  { id: 'generations', label: '世代ファイル', icon: '🏷' },
   { id: 'default', label: 'デフォルト動作', icon: '⚙' },
   { id: 'win', label: 'Windows 統合', icon: '⊞' },
   { id: 'advanced', label: '詳細設定', icon: '⚗' },
@@ -262,6 +265,7 @@ function ShortcutsTab() {
   const capturing = useStore(s => s.capturing)
   const startCapture = useStore(s => s.startCapture)
   const captureKey = useStore(s => s.captureKey)
+  const cancelCapture = useStore(s => s.cancelCapture)
   const quickOpenHotkey = useStore(s => s.quickOpenHotkey)
   const [filter, setFilter] = useState('')
   const fl = filter.trim().toLowerCase()
@@ -269,6 +273,23 @@ function ShortcutsTab() {
   const allBindValues = Object.values(binds)
   const conflicts = new Set(allBindValues.filter((v, i) => allBindValues.indexOf(v) !== i))
   const capturingQuickOpen = capturing === QUICK_OPEN_CAPTURE_ID
+
+  // Grabbing the next keystroke has to happen at the window, in the capture
+  // phase: the previous version listened on a focusable <div>, which lost the
+  // race against App.tsx's own window handler (so the combo never arrived) and
+  // recorded Esc as a binding instead of treating it as "cancel".
+  useEffect(() => {
+    if (!capturing) return
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.key === 'Escape') { cancelCapture(); return }
+      if (isModifierKey(e.key)) return   // wait for the real key
+      captureKey(comboOf(e))
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [capturing, captureKey, cancelCapture])
 
   return (
     <div>
@@ -297,12 +318,7 @@ function ShortcutsTab() {
       </div>
 
       {capturing && (
-        <div
-          style={{ marginBottom: 10, padding: '8px 12px', borderRadius: 6, background: 'var(--accent-soft)', border: '1px solid var(--accent)', fontSize: 12, color: 'var(--accent)' }}
-          onKeyDown={e => { e.preventDefault(); e.stopPropagation(); const parts = []; if (e.ctrlKey) parts.push('Ctrl'); if (e.altKey) parts.push('Alt'); if (e.shiftKey) parts.push('Shift'); if (e.key !== 'Control' && e.key !== 'Alt' && e.key !== 'Shift') parts.push(e.key === ' ' ? 'Space' : e.key.length === 1 ? e.key.toUpperCase() : e.key); if (parts.length) captureKey(parts.join('+')) }}
-          tabIndex={0}
-          autoFocus
-        >
+        <div style={{ marginBottom: 10, padding: '8px 12px', borderRadius: 6, background: 'var(--accent-soft)', border: '1px solid var(--accent)', fontSize: 12, color: 'var(--accent)' }}>
           キーを押してください… (Esc でキャンセル)
         </div>
       )}
@@ -368,6 +384,86 @@ function FilesTab() {
   )
 }
 
+/** 世代ファイル: how names are grouped into "same document, newer version"
+ * sets, plus a live preview against the folder currently in view — the point
+ * being that you can check the grouping by its result, without having to read
+ * the regular expressions. */
+function GenerationsTab() {
+  const genHighlight = useStore(s => s.genHighlight)
+  const toggleGenHighlight = useStore(s => s.toggleGenHighlight)
+  const genRules = useStore(s => s.genRules)
+  const addGenRule = useStore(s => s.addGenRule)
+  const updateGenRule = useStore(s => s.updateGenRule)
+  const removeGenRule = useStore(s => s.removeGenRule)
+  const panes = useStore(s => s.panes)
+  const activePane = useStore(s => s.activePane)
+
+  const files = panes[activePane]?.tabs[panes[activePane].active]?.files ?? []
+  const groups = useMemo(() => previewGroups(files, genRules), [files, genRules])
+
+  return (
+    <div>
+      <Section title="表示" />
+      <Row label="最新版を強調表示" desc="ツールバーの「🏷 最新版」でも切り替えられます">
+        <Toggle value={genHighlight} onChange={toggleGenHighlight} />
+      </Row>
+
+      <Section title="同一とみなす判定" />
+      <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 10 }}>
+        既定では、ファイル名から<b>数字の並び（末尾の英字1文字まで含む）</b>を取り除いたものが一致すれば同じ世代セットとして扱います。
+        たとえば <code>A_20260818.xlsx</code> / <code>A_20260818_01.xlsx</code> / <code>A_20260818a.xlsx</code> は同じセット、
+        <code>B_20260818_01.xlsx</code> は別のセットです。うまく括られない場合だけ、下に正規表現のルールを足してください。
+      </div>
+
+      {genRules.map(r => (
+        <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+          <Toggle value={r.on} onChange={() => updateGenRule(r.id, { on: !r.on })} />
+          <input
+            value={r.label}
+            onChange={e => updateGenRule(r.id, { label: e.target.value })}
+            placeholder="ルール名"
+            style={{ width: 120, height: 28, padding: '0 8px', borderRadius: 6, border: '1px solid var(--border-strong)', background: 'var(--bg-page)', color: 'var(--text)', fontSize: 12, outline: 'none', boxSizing: 'border-box' }}
+          />
+          <input
+            value={r.pattern}
+            onChange={e => updateGenRule(r.id, { pattern: e.target.value })}
+            placeholder="正規表現  例: ^(A)_\d{8}"
+            style={{ flex: 1, minWidth: 0, height: 28, padding: '0 8px', borderRadius: 6, border: `1px solid ${patternError(r.pattern) ? 'var(--danger)' : 'var(--border-strong)'}`, background: 'var(--bg-page)', color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }}
+          />
+          <SmallBtn onClick={() => removeGenRule(r.id)} danger>削除</SmallBtn>
+        </div>
+      ))}
+      <SmallBtn onClick={addGenRule}>ルールを追加</SmallBtn>
+
+      <Section title={`プレビュー（${'アクティブなペインのフォルダ'}）`} />
+      <div style={{ border: '1px solid var(--border)', borderRadius: 7, maxHeight: 260, overflowY: 'auto' }}>
+        {groups.length === 0 ? (
+          <div style={{ padding: '14px 12px', fontSize: 12, color: 'var(--text-muted)' }}>
+            このフォルダには、同じセットとみなせるファイルの組が見つかりませんでした。
+          </div>
+        ) : groups.map(g => (
+          <div key={g.key} style={{ padding: '7px 11px', borderBottom: '1px solid var(--border)' }}>
+            {g.names.map((n, i) => (
+              <div key={n} style={{ fontSize: 11.5, fontFamily: 'var(--mono)', color: i === 0 ? 'var(--accent)' : 'var(--text-muted)', fontWeight: i === 0 ? 650 : 400 }}>
+                {i === 0 ? '● ' : '　 '}{n}
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 6 }}>
+        ● が付いている行が、強調表示される「最新」のファイルです（更新日時が最も新しいもの）。
+      </div>
+    </div>
+  )
+}
+
+/** Whether a rule's pattern fails to compile, so the field can flag it. */
+function patternError(pattern: string): boolean {
+  if (!pattern) return false
+  try { new RegExp(pattern); return false } catch { return true }
+}
+
 function DefaultTab() {
   const adv = useStore(s => s.adv)
   const toggleAdv = useStore(s => s.toggleAdv)
@@ -376,6 +472,9 @@ function DefaultTab() {
       <Section title="操作" />
       <Row label="シングルクリックで開く" desc="ダブルクリックの代わりにシングルクリックで開く">
         <Toggle value={adv.singleClick} onChange={() => toggleAdv('singleClick')} />
+      </Row>
+      <Row label="ペインに戻る/進む/更新ボタンを表示" desc="各ペインのアドレスバー左に配置します">
+        <Toggle value={adv.paneNavButtons} onChange={() => toggleAdv('paneNavButtons')} />
       </Row>
       <Row label="削除前に確認" desc="ゴミ箱へ移動する前に確認ダイアログを表示">
         <Toggle value={adv.confirmDelete} onChange={() => toggleAdv('confirmDelete')} />
@@ -450,6 +549,7 @@ export default function OptionsModal() {
     appearance: <AppearanceTab />,
     shortcuts: <ShortcutsTab />,
     files: <FilesTab />,
+    generations: <GenerationsTab />,
     default: <DefaultTab />,
     win: <WinTab />,
     advanced: <AdvancedTab />,

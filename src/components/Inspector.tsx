@@ -155,7 +155,7 @@ export default function Inspector() {
           )}
 
           {(kind === 'text' || kind === 'sheet') && (
-            <pre style={{ margin: 0, fontFamily: 'var(--mono)', fontSize: 11, lineHeight: 1.65, color: 'var(--text)', background: 'var(--bg-page)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, whiteSpace: 'pre', overflow: 'auto', maxHeight: 420 }}>{text || ' '}</pre>
+            <pre style={{ margin: 0, fontFamily: 'var(--mono)', fontSize: 11, lineHeight: 1.65, color: 'var(--text)', background: 'var(--bg-page)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, whiteSpace: 'pre', overflow: 'auto', maxHeight: 420, tabSize: 12, MozTabSize: 12 } as React.CSSProperties}>{text || ' '}</pre>
           )}
 
           {kind === 'none' && (

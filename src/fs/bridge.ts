@@ -268,8 +268,8 @@ export async function showShellContextMenu(absPath: string, x: number, y: number
   await invoke('show_shell_context_menu', { path: absPath, x: Math.round(x), y: Math.round(y) })
 }
 
-export async function createShortcut(absPath: string): Promise<string> {
-  return invoke<string>('create_shortcut', { target: absPath })
+export async function createShortcut(absPath: string, destDir?: string): Promise<string> {
+  return invoke<string>('create_shortcut', { target: absPath, destDir: destDir ?? null })
 }
 
 export interface ShortcutTarget {
@@ -288,8 +288,8 @@ export async function resolveShortcut(absPath: string): Promise<ShortcutTarget> 
 /** Creates a `<name>へのショートカット.txt` next to absPath, containing its path as
  * plain text — a fallback for items (e.g. some cloud-sync folders) that a real
  * .lnk shortcut can't reliably point at. Resolves to the new file's path. */
-export async function createPathShortcutText(absPath: string): Promise<string> {
-  return invoke<string>('create_path_shortcut_text', { target: absPath })
+export async function createPathShortcutText(absPath: string, destDir?: string): Promise<string> {
+  return invoke<string>('create_path_shortcut_text', { target: absPath, destDir: destDir ?? null })
 }
 
 export async function revealInExplorer(absPath: string): Promise<void> {

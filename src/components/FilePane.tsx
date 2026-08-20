@@ -1,6 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react'
-import { useStore, NOTE_MIN_H, NOTE_MAX_H } from '../store/useStore'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
+import { useStore, NOTE_MIN_H, NOTE_MAX_H, navAvailability } from '../store/useStore'
 import { iconOf, visibleIndices, fmt } from '../utils/fileUtils'
+import { PANE_MIME } from './LayoutTabs'
+import { latestGenerationIndices } from '../utils/generations'
 import { shellIcon, peekIcon, joinPath, splitPath, noteKey, copyText } from '../fs/bridge'
 import type { Pane, FileEntry, ColumnDef, ColumnId } from '../types'
 
@@ -19,6 +21,22 @@ function useShellIcon(name: string, folder: boolean): string | null {
 
 const COL_LABEL: Record<ColumnId, string> = { name: '名前', date: '更新日時', size: 'サイズ' }
 const TAB_MIME = 'application/x-flextab'
+/** Files/folders dragged out of a pane's list. Payload: { pi, paths }. */
+const FILE_MIME = 'application/x-flexfiles'
+
+/** What's currently being dragged out of a list. `dragover` can't read
+ * dataTransfer (the browser only exposes it on `drop`), so the payload is kept
+ * here as well — otherwise the hover feedback couldn't tell copy from move. */
+let filesDrag: { pi: number; paths: string[] } | null = null
+
+/** Explorer's default: within one drive a drag moves, across drives it copies.
+ * Ctrl forces a copy and Shift forces a move, either way. */
+function dropMode(e: React.DragEvent, to: string, from = filesDrag?.paths[0] ?? ''): 'copy' | 'move' {
+  if (e.ctrlKey) return 'copy'
+  if (e.shiftKey) return 'move'
+  const drive = (p: string) => p.slice(0, 2).toLowerCase()
+  return from && drive(from) === drive(to) ? 'move' : 'copy'
+}
 
 /** Build the visible columns for a given pane width, dropping size then date when narrow. */
 function visibleColumns(columns: ColumnDef[], pw: number): ColumnDef[] {
@@ -110,10 +128,49 @@ function RenameInput({ initial, folder }: { initial: string; folder: boolean }) 
   )
 }
 
-function FileRow({ file, idx, pi, cols, gridCols, isActive, selected, focused, tabIdx, renaming, soleSelected }: {
+/** 戻る / 進む / 更新 for one pane, sitting at the left of its address bar.
+ * Hidden entirely when 設定 > 既定 > ペインに戻る/進む/更新ボタンを表示 is off. */
+function PaneNavButtons({ pi, path }: { pi: number; path: string[] }) {
+  const navBack = useStore(s => s.navBack)
+  const navForward = useStore(s => s.navForward)
+  const navigate = useStore(s => s.navigate)
+  // Recomputed on every render; a pane re-renders whenever `path` changes,
+  // which is exactly when the history stacks change.
+  const avail = navAvailability(pi)
+
+  const Btn = ({ label, title, enabled, run }: { label: string; title: string; enabled: boolean; run: () => void }) => (
+    <span
+      onClick={e => { e.stopPropagation(); run() }}
+      title={title}
+      style={{ width: 20, height: 20, flex: '0 0 20px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 4, fontSize: 11, cursor: 'default', color: enabled ? 'var(--text-muted)' : 'var(--text-faint)', opacity: enabled ? 1 : 0.45 }}
+      onMouseEnter={e => { if (enabled) e.currentTarget.style.background = 'var(--bg-hover)' }}
+      onMouseLeave={e => { e.currentTarget.style.background = '' }}
+    >{label}</span>
+  )
+
+  return (
+    <span style={{ display: 'flex', alignItems: 'center', gap: 1, flex: '0 0 auto', marginRight: 6 }}>
+      <Btn label="←" title="戻る (Alt+←)" enabled={avail.back} run={() => navBack(pi)} />
+      <Btn label="→" title="進む (Alt+→)" enabled={avail.forward} run={() => navForward(pi)} />
+      <Btn label="↻" title="最新の情報に更新 (F5)" enabled run={() => void navigate(pi, path, { push: false })} />
+    </span>
+  )
+}
+
+function FileRow({ file, idx, pi, cols, gridCols, isActive, selected, focused, tabIdx, renaming, soleSelected, cut, latest, abs, selectedAbs }: {
   file: FileEntry; idx: number; pi: number; cols: ColumnDef[]; gridCols: string; isActive: boolean; selected: boolean; focused: boolean; tabIdx: number; renaming: boolean; soleSelected: boolean
+  /** Sitting on the clipboard as a pending cut — shown faded, like Explorer. */
+  cut: boolean
+  /** Newest file of its generation set (see utils/generations). */
+  latest: boolean
+  /** Absolute path of this row. */
+  abs: string
+  /** Absolute paths of the whole selection, for dragging several at once. */
+  selectedAbs: string[]
 }) {
   const selectFile = useStore(s => s.selectFile)
+  const dropOnFolder = useStore(s => s.dropOnFolder)
+  const [dropInto, setDropInto] = useState(false)
   const openFile = useStore(s => s.openFile)
   const openCtx = useStore(s => s.openCtx)
   const startRename = useStore(s => s.startRename)
@@ -121,7 +178,10 @@ function FileRow({ file, idx, pi, cols, gridCols, isActive, selected, focused, t
   const ic = iconOf(file)
   const shellUrl = useShellIcon(file.name, !!file.folder)
   const zebra = useStore(s => s.opt.zebra)
-  const bg = selected ? (isActive ? 'var(--bg-active)' : 'var(--bg-hover)') : (zebra && tabIdx % 2 === 1 ? 'var(--bg-stripe)' : 'transparent')
+  const bg = dropInto ? 'var(--accent-soft)'
+    : selected ? (isActive ? 'var(--bg-active)' : 'var(--bg-hover)')
+    : latest ? 'var(--accent-soft)'
+    : (zebra && tabIdx % 2 === 1 ? 'var(--bg-stripe)' : 'transparent')
 
   // Explorer's "slow second click renames": a click on a row that is already
   // the sole selection starts an inline rename — but only after the
@@ -143,16 +203,55 @@ function FileRow({ file, idx, pi, cols, gridCols, isActive, selected, focused, t
 
   return (
     <div
+      draggable={!renaming}
+      onDragStart={e => {
+        cancelPendingRename()
+        // Dragging a row outside the current selection drags just that row —
+        // otherwise the whole selection travels together.
+        const paths = selected && selectedAbs.length ? selectedAbs : [abs]
+        if (!selected) selectFile(pi, idx, e as unknown as React.MouseEvent)
+        filesDrag = { pi, paths }
+        e.dataTransfer.effectAllowed = 'copyMove'
+        e.dataTransfer.setData(FILE_MIME, JSON.stringify({ pi, paths }))
+        e.dataTransfer.setData('text/plain', paths.join('\n'))
+      }}
+      onDragEnd={() => { filesDrag = null }}
+      onDragOver={e => {
+        // Only folders take a drop; a file row lets the list background have it.
+        if (!file.folder || !e.dataTransfer.types.includes(FILE_MIME)) return
+        e.preventDefault()
+        e.stopPropagation()
+        e.dataTransfer.dropEffect = dropMode(e, abs)
+        if (!dropInto) setDropInto(true)
+      }}
+      onDragLeave={() => setDropInto(false)}
+      onDrop={e => {
+        setDropInto(false)
+        if (!file.folder || !e.dataTransfer.types.includes(FILE_MIME)) return
+        e.preventDefault()
+        e.stopPropagation()
+        const { pi: srcPi, paths } = JSON.parse(e.dataTransfer.getData(FILE_MIME)) as { pi: number; paths: string[] }
+        // Refuse to drop a folder into itself or into its own subtree.
+        const low = abs.toLowerCase()
+        if (paths.some(p => low === p.toLowerCase() || low.startsWith(p.toLowerCase() + '\\'))) return
+        void dropOnFolder(splitPath(abs), paths, dropMode(e, abs, paths[0]), srcPi)
+      }}
       onClick={onClick}
       onDoubleClick={() => { cancelPendingRename(); openFile(pi, idx) }}
       onContextMenu={e => { e.preventDefault(); cancelPendingRename(); openCtx(pi, idx, e.clientX, e.clientY) }}
       title={file.name}
       data-focused={focused && isActive ? '1' : undefined}
-      style={{ display: 'grid', gridTemplateColumns: gridCols, alignItems: 'center', height: 'var(--row-h)', padding: '0 10px', gap: 8, fontSize: 'var(--list-fs)', background: bg, color: 'var(--text)', borderBottom: '1px solid var(--col-divider)', cursor: 'default', userSelect: 'none', boxShadow: focused && isActive ? 'inset 0 0 0 1.5px var(--accent)' : 'none', borderRadius: focused && isActive ? 4 : 0 }}
+      style={{ display: 'grid', gridTemplateColumns: gridCols, alignItems: 'center', height: 'var(--row-h)', padding: '0 10px', gap: 8, fontSize: 'var(--list-fs)', background: bg, color: 'var(--text)', opacity: cut ? 0.45 : 1, borderBottom: '1px solid var(--col-divider)', cursor: 'default', userSelect: 'none', boxShadow: focused && isActive ? 'inset 0 0 0 1.5px var(--accent)' : 'none', borderRadius: focused && isActive ? 4 : 0 }}
     >
       {cols.map(col => col.id === 'name'
         ? (
           <div key="name" style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
+            {latest && (
+              <span
+                title="この世代セットで最新のファイル"
+                style={{ width: 3, height: 'calc(var(--row-h) - 6px)', flex: '0 0 3px', borderRadius: 2, background: 'var(--accent)', marginLeft: -6 }}
+              />
+            )}
             {shellUrl
               ? <img src={shellUrl} alt="" draggable={false} style={{ width: 'var(--icon-box, 16px)', height: 'var(--icon-box, 16px)', flex: '0 0 var(--icon-box, 16px)', objectFit: 'contain' }} />
               : (file.folder ? <FolderIcon color={ic.color} /> : <FileIcon color={ic.color} soft={ic.soft} label={ic.label} />)}
@@ -433,15 +532,38 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
   const endAddressEdit = useStore(s => s.endAddressEdit)
   const navigate = useStore(s => s.navigate)
   const openCtxBg = useStore(s => s.openCtxBg)
+  const dropOnFolder = useStore(s => s.dropOnFolder)
   const renaming = useStore(s => s.renaming)
+  const clip = useStore(s => s.clip)
+  const paneNavButtons = useStore(s => s.adv.paneNavButtons)
+  const genHighlight = useStore(s => s.genHighlight)
+  const genRules = useStore(s => s.genRules)
   const [paneDragOver, setPaneDragOver] = useState(false)
+  const [listDropOver, setListDropOver] = useState(false)
   const [tabDragOver, setTabDragOver] = useState<{ ti: number; side: 'before' | 'after' } | null>(null)
   const [tabCtx, setTabCtx] = useState<{ ti: number; x: number; y: number } | null>(null)
   const [addrCtx, setAddrCtx] = useState<{ x: number; y: number } | null>(null)
 
   const isActive = pi === activePane
   const renamingIdx = renaming && renaming.pi === pi ? renaming.idx : -1
+  // Pending-cut paths, lowercased for case-insensitive matching against rows.
+  const cutPaths = useMemo(
+    () => new Set(clip?.mode === 'cut' ? clip.paths.map(p => p.toLowerCase()) : []),
+    [clip],
+  )
   const tab = pane.tabs[pane.active]
+  const dirAbs = joinPath(tab.path)
+  // Absolute paths of the current selection, handed to each row so a drag can
+  // carry the whole selection rather than just the row that started it.
+  const selAbs = useMemo(
+    () => tab.sel.map(i => tab.files[i]).filter(Boolean).map(f => f.abs || joinPath([...tab.path, f.name])),
+    [tab.sel, tab.files, tab.path],
+  )
+  // Newest member of each generation set, when the toolbar toggle is on.
+  const latestIdx = useMemo(
+    () => (genHighlight ? latestGenerationIndices(tab.files, genRules) : new Set<number>()),
+    [genHighlight, genRules, tab.files],
+  )
   const pw = (containerW || 900) / Math.max(1, paneCols) * spanCols - 18
   const cols = visibleColumns(tab.columns, pw)
   const gridCols = gridTemplate(cols)
@@ -516,8 +638,15 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
           {panesLen > 1 && (
             <div
               draggable
-              onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('application/x-flexpane', String(pi)); e.dataTransfer.setData('text/plain', 'pane') }}
-              title="ドラッグして他のペインと入れ替え"
+              onDragStart={e => {
+                e.dataTransfer.effectAllowed = 'move'
+                e.dataTransfer.setData('application/x-flexpane', String(pi))
+                // Same drag, second destination: dropped on a group tab this
+                // moves the pane into that group (see LayoutTabs).
+                e.dataTransfer.setData(PANE_MIME, String(pi))
+                e.dataTransfer.setData('text/plain', 'pane')
+              }}
+              title="ドラッグして他のペインと入れ替え / グループタブに落とすとそのグループへ移動"
               style={{ width: 22, flex: '0 0 22px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'grab', color: 'var(--text-faint)', fontSize: 13, borderRight: '1px solid var(--border)' }}
               onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)', e.currentTarget.style.color = 'var(--text-muted)')}
               onMouseLeave={e => (e.currentTarget.style.background = '', e.currentTarget.style.color = 'var(--text-faint)')}
@@ -617,6 +746,9 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
           title="クリックでパスを編集（右クリックでメニュー）"
           style={{ display: 'flex', alignItems: 'center', height: 30, flex: '0 0 30px', padding: addressEdit === pi ? '0 7px' : '0 10px', borderBottom: '1px solid var(--border)', fontSize: 11.5, overflowX: 'auto', whiteSpace: 'nowrap' }}
         >
+          {paneNavButtons && addressEdit !== pi && (
+            <PaneNavButtons pi={pi} path={tab.path} />
+          )}
           {addressEdit === pi ? (
             <AddressBarInput
               defaultValue={joinPath(tab.path)}
@@ -664,7 +796,22 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
         <div
           ref={listRef}
           onContextMenu={e => { if (e.target === e.currentTarget) { e.preventDefault(); openCtxBg(pi, e.clientX, e.clientY) } }}
-          style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}
+          onDragOver={e => {
+            if (!e.dataTransfer.types.includes(FILE_MIME)) return
+            e.preventDefault()
+            e.dataTransfer.dropEffect = dropMode(e, dirAbs)
+            if (!listDropOver) setListDropOver(true)
+          }}
+          onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setListDropOver(false) }}
+          onDrop={e => {
+            setListDropOver(false)
+            if (!e.dataTransfer.types.includes(FILE_MIME)) return
+            e.preventDefault()
+            const { pi: srcPi, paths } = JSON.parse(e.dataTransfer.getData(FILE_MIME)) as { pi: number; paths: string[] }
+            // Anywhere in the empty list means "into the folder being shown".
+            void dropOnFolder(tab.path, paths, dropMode(e, dirAbs, paths[0]), srcPi)
+          }}
+          style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', position: 'relative', outline: listDropOver ? '2px solid var(--accent)' : 'none', outlineOffset: -2 }}
         >
           {vis.map((idx, row) => (
             <FileRow
@@ -680,6 +827,10 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
               tabIdx={row}
               renaming={renamingIdx === idx}
               soleSelected={tab.sel.length === 1}
+              cut={cutPaths.has((tab.files[idx].abs || joinPath([...tab.path, tab.files[idx].name])).toLowerCase())}
+              latest={latestIdx.has(idx)}
+              abs={tab.files[idx].abs || joinPath([...tab.path, tab.files[idx].name])}
+              selectedAbs={selAbs}
             />
           ))}
         </div>

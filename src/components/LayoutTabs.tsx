@@ -2,14 +2,23 @@ import { useState, useEffect, useRef } from 'react'
 import { useStore } from '../store/useStore'
 import type { LayoutGroup } from '../types'
 
-/** One group tab: click to switch, double-click to rename inline, ✕ to close. */
-function GroupTab({ group, active, closable, onSwitch, onClose, onRename }: {
-  group: LayoutGroup; active: boolean; closable: boolean
+/** Drag payload markers. A group tab accepts two kinds of drop: another group
+ * tab (reorder), and a pane dragged off its tab bar (move it into this group). */
+const GROUP_MIME = 'application/x-flex-group'
+export const PANE_MIME = 'application/x-flex-pane'
+
+/** One group tab: click to switch, double-click to rename inline, ✕ to close,
+ * drag to reorder. */
+function GroupTab({ group, index, active, closable, onSwitch, onClose, onRename, onReorder, onPaneDrop }: {
+  group: LayoutGroup; index: number; active: boolean; closable: boolean
   onSwitch: () => void; onClose: () => void; onRename: (name: string) => void
+  onReorder: (src: number, dest: number) => void
+  onPaneDrop: (pi: number) => void
 }) {
   const [hover, setHover] = useState(false)
   const [editing, setEditing] = useState(false)
   const [val, setVal] = useState(group.name)
+  const [dropSide, setDropSide] = useState<'before' | 'after' | 'into' | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => { if (editing) { inputRef.current?.focus(); inputRef.current?.select() } }, [editing])
@@ -39,19 +48,51 @@ function GroupTab({ group, active, closable, onSwitch, onClose, onRename }: {
 
   return (
     <div
+      draggable={!editing}
+      onDragStart={e => {
+        e.dataTransfer.setData(GROUP_MIME, String(index))
+        e.dataTransfer.effectAllowed = 'move'
+      }}
+      onDragOver={e => {
+        const types = e.dataTransfer.types
+        if (types.includes(PANE_MIME)) {
+          // A pane lands *in* the group, so there's no before/after to pick.
+          e.preventDefault()
+          setDropSide('into')
+        } else if (types.includes(GROUP_MIME)) {
+          e.preventDefault()
+          const r = e.currentTarget.getBoundingClientRect()
+          setDropSide(e.clientX < r.left + r.width / 2 ? 'before' : 'after')
+        }
+      }}
+      onDragLeave={() => setDropSide(null)}
+      onDrop={e => {
+        const side = dropSide
+        setDropSide(null)
+        const paneRaw = e.dataTransfer.getData(PANE_MIME)
+        if (paneRaw) { e.preventDefault(); onPaneDrop(Number(paneRaw)); return }
+        const groupRaw = e.dataTransfer.getData(GROUP_MIME)
+        if (!groupRaw) return
+        e.preventDefault()
+        onReorder(Number(groupRaw), side === 'after' ? index + 1 : index)
+      }}
       onClick={onSwitch}
       onDoubleClick={() => { setVal(group.name); setEditing(true) }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      title={group.name + '（ダブルクリックで名前変更）'}
+      title={group.name + '（ダブルクリックで名前変更・ドラッグで並べ替え）'}
       style={{
+        position: 'relative',
         display: 'flex', alignItems: 'center', gap: 6, height: 28, padding: '0 5px 0 11px', borderRadius: 7, cursor: 'default',
         maxWidth: 168, flex: '0 1 auto', minWidth: 0,
         color: active ? 'var(--accent-contrast)' : 'var(--text-muted)',
-        background: active ? 'var(--accent)' : hover ? 'var(--bg-hover)' : 'transparent',
-        border: active ? 'none' : '1px solid var(--border-strong)',
+        background: dropSide === 'into' ? 'var(--accent-soft)' : active ? 'var(--accent)' : hover ? 'var(--bg-hover)' : 'transparent',
+        border: dropSide === 'into' ? '1px dashed var(--accent)' : active ? 'none' : '1px solid var(--border-strong)',
       }}
     >
+      {(dropSide === 'before' || dropSide === 'after') && (
+        <span style={{ position: 'absolute', top: 2, bottom: 2, [dropSide === 'before' ? 'left' : 'right']: -2, width: 2, borderRadius: 1, background: 'var(--accent)' }} />
+      )}
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: active ? 650 : 500 }}>{group.name}</span>
       {closable && (
         <span
@@ -72,6 +113,8 @@ export default function LayoutTabs() {
   const addLayoutGroup = useStore(s => s.addLayoutGroup)
   const closeLayoutGroup = useStore(s => s.closeLayoutGroup)
   const renameLayoutGroup = useStore(s => s.renameLayoutGroup)
+  const reorderLayoutGroups = useStore(s => s.reorderLayoutGroups)
+  const movePaneToGroup = useStore(s => s.movePaneToGroup)
   const [addHover, setAddHover] = useState(false)
 
   return (
@@ -80,11 +123,14 @@ export default function LayoutTabs() {
         <GroupTab
           key={g.id}
           group={g}
+          index={i}
           active={i === activeLayout}
           closable={layouts.length > 1}
           onSwitch={() => switchLayoutGroup(i)}
           onClose={() => closeLayoutGroup(i)}
           onRename={name => renameLayoutGroup(i, name)}
+          onReorder={(src, dest) => reorderLayoutGroups(src, dest)}
+          onPaneDrop={pi => movePaneToGroup(pi, i)}
         />
       ))}
       <div

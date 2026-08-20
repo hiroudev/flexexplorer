@@ -22,6 +22,10 @@ export default function ToolBar() {
   const navForward = useStore(s => s.navForward)
   const navParent = useStore(s => s.navParent)
 
+  const genHighlight = useStore(s => s.genHighlight)
+  const toggleGenHighlight = useStore(s => s.toggleGenHighlight)
+
+  const [genHover, setGenHover] = useState(false)
   const [renameHover, setRenameHover] = useState(false)
   const [cmdHover, setCmdHover] = useState(false)
   const [optHover, setOptHover] = useState(false)
@@ -40,6 +44,16 @@ export default function ToolBar() {
       <div style={{ flex: 1, minWidth: 0, display: 'flex' }}>
         <LayoutTabs />
       </div>
+
+      {/* Newest-generation highlight: a toolbar toggle rather than a buried
+          setting, since it's meant to be flipped while looking at a folder. */}
+      <div
+        onClick={toggleGenHighlight}
+        onMouseEnter={() => setGenHover(true)}
+        onMouseLeave={() => setGenHover(false)}
+        title={'世代ファイルの最新版を強調' + (genHighlight ? '（オン）' : '（オフ）') + ' — 判定ルールは 設定 > 世代ファイル'}
+        style={{ display: 'flex', alignItems: 'center', gap: 6, height: 30, padding: '0 11px', borderRadius: 7, cursor: 'default', fontSize: 12, fontWeight: 550, border: '1px solid ' + (genHighlight ? 'var(--accent)' : 'var(--border-strong)'), color: genHighlight ? 'var(--accent-contrast)' : genHover ? 'var(--text)' : 'var(--text-muted)', background: genHighlight ? 'var(--accent)' : genHover ? 'var(--bg-hover)' : 'transparent' }}
+      >🏷 最新版</div>
 
       {/* Rename btn */}
       <div

@@ -64,6 +64,7 @@ export default function ContextMenu() {
   const openInVscode = useStore(s => s.openInVscode)
   const createShortcutForSel = useStore(s => s.createShortcutForSel)
   const createPathShortcutTextForSel = useStore(s => s.createPathShortcutTextForSel)
+  const createShortcutForFolder = useStore(s => s.createShortcutForFolder)
   const showOsContextMenuForSel = useStore(s => s.showOsContextMenuForSel)
   const createNewItem = useStore(s => s.createNewItem)
   const duplicateSelectedAsDatedCopy = useStore(s => s.duplicateSelectedAsDatedCopy)
@@ -114,6 +115,12 @@ export default function ContextMenu() {
     items.push({ icon: '✚', iconColor: 'var(--accent)', label: '新規', key: '', arrow: true, subId: 'new', onClick: () => openSub('new') })
     items.push({ divider: true })
     items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); if (clip) void paste() } })
+    items.push({ divider: true })
+    items.push({ divider: true })
+    // Same pair as the item menu, but aimed at the folder being shown — the
+    // text variant records this folder's own path (see createShortcutForFolder).
+    items.push({ icon: '📝', iconColor: 'var(--text-muted)', label: 'このフォルダのショートカットテキストを作成', key: '', onClick: () => { closeCtx(); void createShortcutForFolder(true) } })
+    items.push({ icon: '🔗', iconColor: 'var(--text-muted)', label: 'このフォルダのショートカットを作成', key: '', onClick: () => { closeCtx(); void createShortcutForFolder(false) } })
     items.push({ divider: true })
     items.push({ icon: '📌', iconColor: 'var(--warn)', label: hasNote ? '付箋メモを表示' : 'このフォルダに付箋メモ', key: 'Ctrl+M', onClick: () => { closeCtx(); addNote() } })
     items.push({ icon: '★', iconColor: '#B7791F', label: 'ブックマークに追加', key: '', onClick: () => { closeCtx(); addBookmark() } })

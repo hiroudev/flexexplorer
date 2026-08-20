@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { THEMES } from 'flex-design/themes/presets.js'
 import { applyTheme } from 'flex-design/runtime/theme.js'
-import type { AppState, FileEntry, Pane, PaneTab, RenameRule, OptTab, ColumnId, LayoutGroup, FolderNote } from '../types'
+import type { AppState, FileEntry, Pane, PaneTab, RenameRule, OptTab, ColumnId, LayoutGroup, FolderNote, GenerationRule } from '../types'
 import { fmt, fmtDate, hashStr, uidFor, applyRules, visibleIndices } from '../utils/fileUtils'
 import {
   isTauri, isRealPath, listDir, listDrives, homeDir, launchPath, openPath, splitPath, joinPath, renamePath,
@@ -74,10 +74,15 @@ function makePane1(): Pane {
  * in SHORTCUT_GROUPS below, since changing it has to re-register with the OS. */
 export const QUICK_OPEN_CAPTURE_ID = '__quickOpenHotkey'
 
+/** The bindable actions, as shown in Options > ショートカット. Each id must
+ * have a matching entry in ACTIONS (keys.ts) — that's what makes the binding
+ * actually fire; an id listed here without one would show but do nothing. */
 const SHORTCUT_GROUPS = [
-  { title: 'ナビゲーション', items: [['nav.up','上の項目へ','↑'],['nav.down','下の項目へ','↓'],['nav.parent','親フォルダへ','Alt+↑'],['nav.back','戻る','Alt+←'],['nav.forward','進む','Alt+→'],['nav.open','開く / フォルダへ','Enter'],['nav.newtab','新しいタブ','Ctrl+T'],['nav.closetab','タブを閉じる','Ctrl+W'],['cmd.goto','GoTo','Ctrl+G'],['view.split','ペインを切替','Ctrl+\\']] },
-  { title: '表示', items: [['view.inspector','Inspector を開閉','Space'],['cmd.palette','コマンドパレット','Ctrl+Shift+P'],['cmd.options','オプション','Ctrl+,'],['view.density','表示密度を切替','Ctrl+Shift+D'],['view.theme','テーマを切替','Ctrl+Shift+L'],['view.sidebar','サイドバーを開閉','Ctrl+B']] },
-  { title: '編集', items: [['edit.copy','コピー','Ctrl+C'],['edit.cut','切り取り','Ctrl+X'],['edit.paste','貼り付け','Ctrl+V'],['edit.rename','名前の変更','F2'],['edit.bulk','一括リネーム','Ctrl+Shift+R'],['edit.delete','削除','Del'],['edit.copypath','パスをコピー','Ctrl+Shift+C']] },
+  { title: 'ナビゲーション', items: [['nav.up','上の項目へ','↑'],['nav.down','下の項目へ','↓'],['nav.parent','親フォルダへ','Alt+↑'],['nav.back','戻る','Alt+←'],['nav.forward','進む','Alt+→'],['nav.refresh','最新の情報に更新','F5'],['nav.open','開く / フォルダへ','Enter'],['nav.newtab','新しいタブ','Ctrl+T'],['nav.closetab','タブを閉じる','Ctrl+W'],['nav.address','パスを編集','Ctrl+L'],['cmd.goto','GoTo','Ctrl+G']] },
+  { title: '表示', items: [['view.inspector','Inspector を開閉','Space'],['cmd.palette','コマンドパレット','Ctrl+Shift+P'],['cmd.options','オプション','Ctrl+,'],['cmd.workspaces','ワークスペース','Ctrl+Shift+S'],['view.density','表示密度を切替','Ctrl+Shift+D'],['view.theme','テーマを切替','Ctrl+Shift+L'],['view.sidebar','サイドバーを開閉','Ctrl+B']] },
+  { title: 'ペイン', items: [['view.split','ペインを切替','Ctrl+\\'],['pane.swap','ペインを入れ替え','Ctrl+Shift+X'],['pane.addright','右にペインを追加','Ctrl+Alt+→'],['pane.adddown','下にペインを追加','Ctrl+Alt+↓'],['pane.close','ペインを閉じる','Ctrl+Alt+X']] },
+  { title: 'グループ / タブ', items: [['group.prev','前のグループへ','Ctrl+PageUp'],['group.next','次のグループへ','Ctrl+PageDown'],['group.reopen','閉じたグループを復元','Ctrl+Shift+G'],['tab.prev','前のタブへ','Ctrl+←'],['tab.next','次のタブへ','Ctrl+→'],['tab.reopen','閉じたタブを復元','Ctrl+Shift+T']] },
+  { title: '編集', items: [['edit.copy','コピー','Ctrl+C'],['edit.cut','切り取り','Ctrl+X'],['edit.paste','貼り付け','Ctrl+V'],['edit.rename','名前の変更','F2'],['edit.bulk','一括リネーム','Ctrl+Shift+R'],['edit.delete','削除','Del'],['edit.copypath','パスをコピー','Ctrl+Shift+C'],['edit.note','付箋メモ','Ctrl+M'],['edit.props','プロパティ','Alt+Enter']] },
   { title: '検索', items: [['find.filter','フィルタ検索','Ctrl+F'],['find.global','グローバル検索','Ctrl+Shift+F']] },
 ]
 
@@ -122,6 +127,27 @@ function curLayoutId(s: AppState): string {
 
 const MAX_PANES = 9
 const MAX_COLS = 4
+
+/** How many grid rows `n` panes occupy at `cols` columns. */
+export function rowCount(n: number, cols: number): number {
+  return Math.max(1, Math.ceil(Math.max(1, n) / Math.max(1, cols)))
+}
+
+/** Equal-share track weights, used for new groups and for sessions saved
+ * before pane resizing existed. */
+function evenFracs(n: number): number[] {
+  return Array.from({ length: Math.max(1, n) }, () => 1)
+}
+
+/** Pads/trims stored weights to `n` tracks — the pane count changes whenever a
+ * pane is added or closed, and a stale-length array would misalign the grid. */
+function fitFracs(fr: number[] | undefined, n: number): number[] {
+  const want = Math.max(1, n)
+  if (!fr || !fr.length) return evenFracs(want)
+  if (fr.length === want) return fr.map(f => (f > 0 ? f : 1))
+  const avg = fr.reduce((a, b) => a + b, 0) / fr.length || 1
+  return Array.from({ length: want }, (_, i) => (fr[i] > 0 ? fr[i] : avg))
+}
 const MAX_ROWS = 3
 
 /** Create a new single-tab pane showing the same folder as `src`. */
@@ -214,8 +240,15 @@ interface Actions {
   openInVscode(): void
   createShortcutForSel(): Promise<void>
   createPathShortcutTextForSel(): Promise<void>
+  /** Background right-click: shortcut to the shown folder, placed inside it. */
+  createShortcutForFolder(text: boolean): Promise<void>
+  /** Drop `paths` onto `destPath` (a folder), copying or moving them there.
+   * `srcPi` is the pane they were dragged from, so it can be refreshed too. */
+  dropOnFolder(destPath: string[], paths: string[], mode: 'copy' | 'move', srcPi: number): Promise<void>
   showOsContextMenuForSel(x: number, y: number): Promise<void>
   switchTab(pi: number, ti: number): void
+  /** Steps the active tab of `pi` by `dir`, wrapping at both ends (Ctrl+←/→). */
+  cycleTab(pi: number, dir: 1 | -1): void
   closeTab(pi: number, ti: number): void
   newTab(pi: number): void
   setActivePane(pi: number): void
@@ -247,6 +280,10 @@ interface Actions {
   closeQuickOpen(): void
   submitQuickOpen(path: string): void
   renameLayoutGroup(i: number, name: string): void
+  /** Drag-reorder the group tabs; `activeLayout` follows the moved group. */
+  reorderLayoutGroups(src: number, dest: number): void
+  /** Move pane `pi` out of the active group and onto the end of group `gi`. */
+  movePaneToGroup(pi: number, gi: number): void
   // tabs: pin / cleanup / restore / drag-reorder / move between panes
   toggleTabPin(pi: number, ti: number): void
   cleanTabs(pi: number): void
@@ -269,8 +306,10 @@ interface Actions {
   // drag
   startSidebarDrag(startX: number): void
   startSplitDrag(startX: number, paneW: number): void
+  /** Begin dragging the boundary after column `ci` / row `ri` of the pane grid. */
+  startTrackDrag(axis: 'col' | 'row', index: number, start: number, totalPx: number): void
   startInspectorDrag(startX: number): void
-  dragMove(clientX: number): void
+  dragMove(clientX: number, clientY?: number): void
   dragEnd(): void
   // ctx
   openCtx(pi: number, idx: number, x: number, y: number): void
@@ -321,6 +360,13 @@ interface Actions {
   toggleAdv(k: keyof AppState['adv']): void
   startCapture(id: string): void
   captureKey(combo: string): void
+  /** Abandons an in-progress key capture without changing any binding. */
+  cancelCapture(): void
+  // generation highlighting (newest of each A_YYYYMMDD… family)
+  toggleGenHighlight(): void
+  addGenRule(): void
+  updateGenRule(id: string, patch: Partial<GenerationRule>): void
+  removeGenRule(id: string): void
   exportShortcuts(): void
   importShortcuts(): void
   // palette
@@ -343,10 +389,24 @@ interface Actions {
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null
-let dragState: { type: string; startX: number; sidebarW: number; inspectorW: number; pane0Pct: number; paneW: number; colId?: ColumnId; colW?: number; colPi?: number } | null = null
+let dragState: { type: string; startX: number; sidebarW: number; inspectorW: number; pane0Pct: number; paneW: number; colId?: ColumnId; colW?: number; colPi?: number; axis?: 'col' | 'row'; trackIndex?: number; totalPx?: number; fracs?: number[] } | null = null
 // Per-pane back/forward history of path segments, namespaced by layout group id (used under Tauri).
 const histBack: Record<string, string[][]> = {}
 const histFwd: Record<string, string[][]> = {}
+
+// Pane-grid track weights per layout group id. Kept alongside the store rather
+// than inside LayoutGroup so every place that stashes/restores a group doesn't
+// have to remember to carry them; a group with no entry falls back to equal
+// shares, which is also what a freshly restored workspace gets.
+const groupTracks: Record<string, { cols: number[]; rows: number[] }> = {}
+
+/** Whether `pi` has anywhere to go back/forward to, for the per-pane nav
+ * buttons. These maps aren't part of the store, so this is only accurate at
+ * render time — which is enough, since a pane re-renders whenever it moves. */
+export function navAvailability(pi: number): { back: boolean; forward: boolean } {
+  const key = curLayoutId(useStore.getState()) + ':' + pi
+  return { back: !!histBack[key]?.length, forward: !!histFwd[key]?.length }
+}
 // Type-ahead (keyboard prefix search) state.
 let typeAheadBuf = ''
 let typeAheadTime = 0
@@ -414,6 +474,9 @@ interface SessionData {
   sidebarHidden?: boolean
   inspectorW?: number
   inspectorOpen?: boolean
+  /** Pane-grid track weights of the active group (see LayoutGroup.colFracs). */
+  colFracs?: number[]
+  rowFracs?: number[]
 }
 
 /** Serialize the current view state (all layout groups + open folders) for save/restore. */
@@ -453,6 +516,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   sidebarHidden: false,
   inspectorW: 320,
   pane0Pct: 50,
+  colFracs: evenFracs(2),
+  rowFracs: evenFracs(1),
   gridCols: 2,
   panes: [makePane0(), makePane1()],
   ctx: null,
@@ -463,7 +528,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   capturing: null,
   binds: defaultBinds(),
   rename: { rules: defaultRules(), addOpen: false },
-  adv: { hidden: true, alwaysExt: true, confirmDelete: true, restore: true, explorerCtx: true, quickLaunch: true, jumpType: false, gpu: true, telemetry: false, singleClick: false },
+  adv: { hidden: true, alwaysExt: true, confirmDelete: true, restore: true, explorerCtx: true, quickLaunch: true, jumpType: false, gpu: true, telemetry: false, singleClick: false, paneNavButtons: true },
   opt: { theme: 'flex-light', accent: null, fontSize: 13, rowHeight: 'compact', iconSize: 16, radius: 'medium', zebra: false, dimInactive: true, anim: 'on' },
   palette: { open: false, q: '', sel: 0 },
   goto: { open: false, q: '', sel: 0 },
@@ -485,6 +550,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   extTools: { tortoiseSvn: false, winmerge: false },
   quickOpenHotkey: 'Ctrl+Alt+O',
   quickOpen: { open: false },
+  genHighlight: false,
+  genRules: [],
 
   setTheme: (t) => { applyTheme(t, document.documentElement); set({ theme: t, opt: { ...get().opt, theme: t } }) },
   toggleTheme: () => {
@@ -517,16 +584,15 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (f.abs) {
       const segs = splitPath(f.abs)
       if (f.folder) { void get().navigate(pi, segs); return }
-      if (isTauri) { void get().openPathOrShortcut(pi, segs, f.abs); set({ inspectorOpen: true }); return }
+      if (isTauri) { void get().openPathOrShortcut(pi, segs, f.abs); return }
     }
     if (f.folder) { get().openFolderTab(pi, f.name); return }
     if (isTauri && isRealPath(tab.path)) {
       const abs = joinPath([...tab.path, f.name])
       void get().openPathOrShortcut(pi, [...tab.path, f.name], abs)
-      set({ inspectorOpen: true })
       return
     }
-    set({ inspectorOpen: true }); get().showToast('開く: ' + f.name)
+    get().showToast('開く: ' + f.name)
   },
 
   /** Opens `segs` with the OS default handler — except a `.lnk` pointing at a
@@ -734,12 +800,25 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const pi = s.activePane
     const t = activeTab(s)
     if (!isTauri || !isRealPath(t.path)) return
+    // A cut empties the source folders, so any pane showing one of them is now
+    // stale — collect them before the move and refresh them alongside the
+    // destination (a copy leaves the sources untouched, so it needs none).
+    const sourceDirs = clip.mode === 'cut'
+      ? [...new Set(clip.paths.map(p => joinPath(splitPath(p).slice(0, -1)).toLowerCase()))]
+      : []
     try {
       const n = clip.mode === 'copy'
         ? await copyEntries(clip.paths, t.path)
         : await moveEntries(clip.paths, t.path)
       if (clip.mode === 'cut') set({ clip: null })
       await get().navigate(pi, t.path, { push: false })
+      for (const [i, pane] of get().panes.entries()) {
+        if (i === pi) continue
+        const pt = pane.tabs[pane.active]
+        if (!isRealPath(pt.path)) continue
+        if (!sourceDirs.includes(joinPath(pt.path).toLowerCase())) continue
+        await get().navigate(i, pt.path, { push: false })
+      }
       get().showToast(`${n} 件を貼り付け`)
     } catch (err) { get().showToast('貼り付け失敗: ' + String(err)) }
   },
@@ -909,6 +988,52 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
   },
 
+  // Folder-level (background right-click) counterparts: the shortcut points at
+  // the folder currently shown, and is written *inside* that same folder.
+  createShortcutForFolder: async (text) => {
+    const s = get()
+    const pi = s.activePane
+    const t = activeTab(s)
+    const abs = joinPath(t.path)
+    if (!isTauri || !isRealPath(t.path)) { get().showToast('ショートカットを作成'); return }
+    try {
+      if (text) await createPathShortcutText(abs, abs)
+      else await createShortcut(abs, abs)
+      await get().navigate(pi, t.path, { push: false })
+      get().showToast(text ? 'テキストショートカットを作成しました' : 'ショートカットを作成しました')
+    } catch (err) { get().showToast('作成失敗: ' + String(err)) }
+  },
+
+  dropOnFolder: async (destPath, paths, mode, srcPi) => {
+    if (!paths.length) return
+    if (!isTauri || !isRealPath(destPath)) return
+    const dest = joinPath(destPath).toLowerCase()
+    // Dropping something onto the folder it already sits in, or onto itself,
+    // is a no-op rather than an error — same rule as paste.
+    const targets = paths.filter(p => {
+      const low = p.toLowerCase()
+      if (low === dest) return false
+      return joinPath(splitPath(p).slice(0, -1)).toLowerCase() !== dest || mode === 'copy'
+    })
+    if (!targets.length) return
+    try {
+      const n = mode === 'copy'
+        ? await copyEntries(targets, destPath)
+        : await moveEntries(targets, destPath)
+      // Refresh every pane showing either end of the operation: the destination
+      // gained entries, and a move emptied the source.
+      const dirty = new Set([dest])
+      if (mode === 'move') targets.forEach(p => dirty.add(joinPath(splitPath(p).slice(0, -1)).toLowerCase()))
+      for (const [i, pane] of get().panes.entries()) {
+        const t = pane.tabs[pane.active]
+        if (!isRealPath(t.path)) continue
+        if (!dirty.has(joinPath(t.path).toLowerCase()) && i !== srcPi) continue
+        await get().navigate(i, t.path, { push: false })
+      }
+      get().showToast(`${n} 件を${mode === 'copy' ? 'コピー' : '移動'}しました`)
+    } catch (err) { get().showToast((mode === 'copy' ? 'コピー' : '移動') + '失敗: ' + String(err)) }
+  },
+
   showOsContextMenuForSel: async (x, y) => {
     const t = activeTab(get())
     const abs = focusedAbs(t)
@@ -918,6 +1043,14 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   },
 
   switchTab: (pi, ti) => set(s => { const panes = clonePanes(s.panes); panes[pi].active = ti; return { panes, activePane: pi, renaming: null } }),
+
+  cycleTab: (pi, dir) => set(s => {
+    const n = s.panes[pi]?.tabs.length ?? 0
+    if (n < 2) return {}
+    const panes = clonePanes(s.panes)
+    panes[pi].active = (panes[pi].active + dir + n) % n
+    return { panes, activePane: pi, renaming: null }
+  }),
 
   closeTab: (pi, ti) => {
     const p = get().panes[pi]
@@ -1055,6 +1188,48 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     return { panes, activePane: b }
   }),
 
+  reorderLayoutGroups: (src, dest) => {
+    const s = get()
+    if (src === dest || src < 0 || src >= s.layouts.length) return
+    // Stash live state first, or the active group would be reinserted with a
+    // stale `panes` snapshot from whenever it was last switched away from.
+    const stashed = s.layouts.map((g, gi) => gi === s.activeLayout
+      ? { ...g, panes: clonePanes(s.panes), gridCols: s.gridCols, activePane: s.activePane }
+      : g)
+    const moved = stashed[src]
+    const rest = stashed.filter((_, i) => i !== src)
+    const at = Math.max(0, Math.min(rest.length, dest > src ? dest - 1 : dest))
+    const layouts = [...rest.slice(0, at), moved, ...rest.slice(at)]
+    set({ layouts, activeLayout: layouts.findIndex(g => g.id === stashed[s.activeLayout].id) })
+  },
+
+  movePaneToGroup: (pi, gi) => {
+    const s = get()
+    if (gi < 0 || gi >= s.layouts.length || gi === s.activeLayout) return
+    if (s.panes.length < 2) { get().showToast('最後のペインは移動できません'); return }
+    const target = s.layouts[gi]
+    if (target.panes.length >= MAX_PANES) { get().showToast('移動先にこれ以上ペインを追加できません'); return }
+    const moving = clonePanes([s.panes[pi]])[0]
+    const remaining = clonePanes(s.panes.filter((_, i) => i !== pi))
+    const layouts = s.layouts.map((g, i) => {
+      if (i === s.activeLayout) {
+        return { ...g, panes: remaining, gridCols: Math.min(g.gridCols, Math.max(1, remaining.length)), activePane: 0 }
+      }
+      if (i === gi) {
+        const panes = [...clonePanes(g.panes), moving]
+        return { ...g, panes, gridCols: Math.min(MAX_COLS, g.gridCols + 1), activePane: panes.length - 1 }
+      }
+      return g
+    })
+    set({
+      layouts,
+      panes: remaining,
+      gridCols: layouts[s.activeLayout].gridCols,
+      activePane: Math.min(s.activePane, remaining.length - 1),
+    })
+    get().showToast(`ペインを「${target.name}」へ移動しました`)
+  },
+
   switchLayoutGroup: (i) => {
     const s = get()
     if (i < 0 || i >= s.layouts.length || i === s.activeLayout) return
@@ -1063,12 +1238,16 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       ? { ...g, panes: clonePanes(s.panes), gridCols: s.gridCols, activePane: s.activePane }
       : g)
     const target = layouts[i]
+    groupTracks[s.layouts[s.activeLayout].id] = { cols: s.colFracs, rows: s.rowFracs }
+    const tracks = groupTracks[target.id]
     set({
       layouts,
       activeLayout: i,
       panes: clonePanes(target.panes),
       gridCols: target.gridCols,
       activePane: Math.min(target.activePane, Math.max(0, target.panes.length - 1)),
+      colFracs: fitFracs(tracks?.cols, target.gridCols),
+      rowFracs: fitFracs(tracks?.rows, rowCount(target.panes.length, target.gridCols)),
     })
     if (isTauri) {
       const cur = get().panes
@@ -1184,6 +1363,24 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const s = get()
     const newPane = makePaneForPath(path)
     const gi = s.layouts.findIndex(g => g.name === 'tmp')
+
+    // Already showing this folder in the tmp group? Just go to it. Repeatedly
+    // opening the same folder from BlueWind/Win+R should land you back on the
+    // pane you already have, not stack up duplicates of it.
+    if (gi >= 0) {
+      const want = joinPath(splitPath(path)).toLowerCase()
+      // The live `panes` array *is* the active group's panes; a group that
+      // isn't active keeps its own copy in `layouts`.
+      const panes = gi === s.activeLayout ? s.panes : s.layouts[gi].panes
+      for (const [pi, pane] of panes.entries()) {
+        const ti = pane.tabs.findIndex(t => isRealPath(t.path) && joinPath(t.path).toLowerCase() === want)
+        if (ti < 0) continue
+        if (gi !== s.activeLayout) get().switchLayoutGroup(gi)
+        get().switchTab(pi, ti)
+        set({ activePane: pi })
+        return
+      }
+    }
 
     if (gi < 0) {
       // No "tmp" group yet: stash whatever's currently live into its own
@@ -1378,8 +1575,37 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   startSplitDrag: (startX, paneW) => { dragState = { type: 'split', startX, sidebarW: get().sidebarW, inspectorW: get().inspectorW, pane0Pct: get().pane0Pct, paneW } },
   startInspectorDrag: (startX) => { dragState = { type: 'inspector', startX, sidebarW: get().sidebarW, inspectorW: get().inspectorW, pane0Pct: get().pane0Pct, paneW: 0 } },
 
-  dragMove: (clientX) => {
+  startTrackDrag: (axis, index, start, totalPx) => {
+    const s = get()
+    const fracs = axis === 'col'
+      ? fitFracs(s.colFracs, s.gridCols)
+      : fitFracs(s.rowFracs, rowCount(s.panes.length, s.gridCols))
+    dragState = { type: 'track', startX: start, sidebarW: 0, inspectorW: 0, pane0Pct: 0, paneW: 0, axis, trackIndex: index, totalPx, fracs }
+  },
+
+  dragMove: (clientX, clientY) => {
     if (!dragState) return
+    if (dragState.type === 'track') {
+      const { axis, trackIndex = 0, totalPx = 1, fracs = [] } = dragState
+      const pos = axis === 'row' ? (clientY ?? dragState.startX) : clientX
+      const d = pos - dragState.startX
+      // Only the two tracks either side of this boundary change, so every other
+      // boundary in the grid stays exactly where it is — the reason the pane
+      // edges across a row (or down a column) remain in one straight line.
+      const total = fracs.reduce((a, b) => a + b, 0)
+      const perPx = total / Math.max(1, totalPx)
+      const a0 = fracs[trackIndex]
+      const b0 = fracs[trackIndex + 1]
+      if (a0 === undefined || b0 === undefined) return
+      const pair = a0 + b0
+      // Keep both sides at ≥12% of the pair, so a track can't be dragged shut.
+      const min = pair * 0.12
+      const next = [...fracs]
+      next[trackIndex] = Math.max(min, Math.min(pair - min, a0 + d * perPx))
+      next[trackIndex + 1] = pair - next[trackIndex]
+      set(axis === 'row' ? { rowFracs: next } : { colFracs: next })
+      return
+    }
     const dx = clientX - dragState.startX
     if (dragState.type === 'sidebar') set({ sidebarW: Math.max(180, Math.min(420, dragState.sidebarW + dx)) })
     else if (dragState.type === 'inspector') set({ inspectorW: Math.max(300, Math.min(620, dragState.inspectorW - dx)) })
@@ -1448,6 +1674,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
         sidebarHidden: !!data.sidebarHidden,
         inspectorW: data.inspectorW ?? get().inspectorW,
         inspectorOpen: data.inspectorOpen ?? get().inspectorOpen,
+        colFracs: fitFracs(data.colFracs, active.gridCols),
+        rowFracs: fitFracs(data.rowFracs, rowCount(active.panes.length, active.gridCols)),
       })
       // Re-read folder contents from disk for each tab of the active group.
       // Other groups are lazily refreshed when the user switches to them.
@@ -1673,6 +1901,13 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   },
   toggleAdv: (k) => set(s => ({ adv: { ...s.adv, [k]: !s.adv[k] } })),
   startCapture: (id) => set({ capturing: id }),
+  cancelCapture: () => set({ capturing: null }),
+
+  toggleGenHighlight: () => set(s => ({ genHighlight: !s.genHighlight })),
+  addGenRule: () => set(s => ({ genRules: [...s.genRules, { id: rid(), on: true, label: '新しいルール', pattern: '' }] })),
+  updateGenRule: (id, patch) => set(s => ({ genRules: s.genRules.map(r => (r.id === id ? { ...r, ...patch } : r)) })),
+  removeGenRule: (id) => set(s => ({ genRules: s.genRules.filter(r => r.id !== id) })),
+
   captureKey: (combo) => {
     const id = get().capturing
     // The global quick-open hotkey isn't a cosmetic `binds` entry like the
@@ -1731,6 +1966,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     opt: s.opt,
     adv: s.adv,
     binds: s.binds,
+    genHighlight: s.genHighlight,
+    genRules: s.genRules,
     pins: s.pins,
     recent: s.recent,
     bookmarks: s.bookmarks,
@@ -1740,6 +1977,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     inspectorW: s.inspectorW,
     inspectorOpen: s.inspectorOpen,
     pane0Pct: s.pane0Pct,
+    colFracs: s.colFracs,
+    rowFracs: s.rowFracs,
     quickOpenHotkey: s.quickOpenHotkey,
   }),
 }))

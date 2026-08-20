@@ -36,6 +36,11 @@ export interface LayoutGroup {
   panes: Pane[]
   gridCols: number
   activePane: number
+  /** Relative widths of the grid's columns / heights of its rows, as CSS `fr`
+   * weights. Absent on sessions saved before pane resizing existed, in which
+   * case the tracks fall back to equal shares. */
+  colFracs?: number[]
+  rowFracs?: number[]
 }
 
 export interface RenameRule {
@@ -83,6 +88,8 @@ export interface AdvancedState {
   gpu: boolean
   telemetry: boolean
   singleClick: boolean
+  /** Show 戻る/進む/更新 buttons in every pane's address bar. */
+  paneNavButtons: boolean
 }
 
 export interface CtxState {
@@ -136,7 +143,7 @@ export interface ColumnDef {
 }
 
 export type Modal = 'rename' | 'options' | 'workspaces' | null
-export type OptTab = 'appearance' | 'shortcuts' | 'files' | 'default' | 'win' | 'advanced'
+export type OptTab = 'appearance' | 'shortcuts' | 'files' | 'generations' | 'default' | 'win' | 'advanced'
 
 export interface AppState {
   theme: string
@@ -149,6 +156,9 @@ export interface AppState {
   inspectorW: number
   pane0Pct: number
   gridCols: number
+  /** Live track weights for the active group (see LayoutGroup.colFracs). */
+  colFracs: number[]
+  rowFracs: number[]
   panes: Pane[]
   ctx: CtxState | null
   modal: Modal
@@ -184,6 +194,21 @@ export interface AppState {
    * even when FlexExplorer doesn't have focus. User-configurable. */
   quickOpenHotkey: string
   quickOpen: { open: boolean }
+  /** Highlight the newest file of each generation set (see utils/generations). */
+  genHighlight: boolean
+  /** User overrides for how names are grouped into generation sets. */
+  genRules: GenerationRule[]
+}
+
+/** A user-supplied override for how file names are grouped into generation
+ * sets. `pattern` is a regular expression; files whose capture groups (or,
+ * with no capture group, whole match) are equal belong to the same set. */
+export interface GenerationRule {
+  id: string
+  on: boolean
+  /** Shown in the settings list so a rule is recognisable at a glance. */
+  label: string
+  pattern: string
 }
 
 export interface IconInfo {
