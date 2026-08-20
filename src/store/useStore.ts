@@ -1960,6 +1960,21 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   name: 'flexexplorer:settings',
   version: 1,
   storage: createJSONStorage(() => localStorage),
+  // zustand's default merge is shallow, so a persisted `binds`/`adv` object
+  // REPLACES the defaults wholesale. Any action or toggle added in a later
+  // version would then be missing for anyone with saved settings — which is
+  // exactly how Ctrl+L and Ctrl+Alt+→ went dead after the action list grew.
+  // Fill the gaps per key instead, keeping whatever the user chose.
+  merge: (persisted, current) => {
+    const p = (persisted ?? {}) as Partial<AppState>
+    return {
+      ...current,
+      ...p,
+      binds: { ...defaultBinds(), ...(p.binds ?? {}) },
+      adv: { ...current.adv, ...(p.adv ?? {}) },
+      opt: { ...current.opt, ...(p.opt ?? {}) },
+    }
+  },
   // Persist only user preferences — never transient/session state like panes.
   partialize: (s) => ({
     theme: s.theme,
