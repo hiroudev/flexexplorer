@@ -196,6 +196,8 @@ export interface AppState {
   /** System-wide hotkey (e.g. "Ctrl+Alt+O") that pops the quick-open prompt
    * even when FlexExplorer doesn't have focus. User-configurable. */
   quickOpenHotkey: string
+  /** Workspace Ctrl+N opens a new window into, if any is marked default. */
+  defaultWorkspace: string | null
   quickOpen: { open: boolean }
   /** A copy/move being watched: progress for the bar, plus what to refresh
    * and re-ask when it ends. Null when nothing is running. */

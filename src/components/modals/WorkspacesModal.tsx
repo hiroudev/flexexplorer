@@ -9,6 +9,8 @@ export default function WorkspacesModal() {
   const loadNamedWorkspace = useStore(s => s.loadNamedWorkspace)
   const openWorkspaceInNewWindow = useStore(s => s.openWorkspaceInNewWindow)
   const deleteNamedWorkspace = useStore(s => s.deleteNamedWorkspace)
+  const defaultWorkspace = useStore(s => s.defaultWorkspace)
+  const setDefaultWorkspace = useStore(s => s.setDefaultWorkspace)
   const [name, setName] = useState('')
   const [pendingOverwrite, setPendingOverwrite] = useState(false)
 
@@ -77,6 +79,8 @@ export default function WorkspacesModal() {
               <Row
                 key={ws}
                 name={ws}
+                isDefault={ws === defaultWorkspace}
+                onToggleDefault={() => setDefaultWorkspace(ws === defaultWorkspace ? null : ws)}
                 onOpen={() => loadNamedWorkspace(ws)}
                 onOpenInNewWindow={() => openWorkspaceInNewWindow(ws)}
                 onUpdate={() => saveWorkspaceAs(ws)}
@@ -125,8 +129,9 @@ function ConfirmBtn({ label, confirmLabel, tone, onConfirm }: {
   )
 }
 
-function Row({ name, onOpen, onOpenInNewWindow, onUpdate, onDelete }: {
-  name: string; onOpen: () => void; onOpenInNewWindow: () => void; onUpdate: () => void; onDelete: () => void
+function Row({ name, isDefault, onToggleDefault, onOpen, onOpenInNewWindow, onUpdate, onDelete }: {
+  name: string; isDefault: boolean; onToggleDefault: () => void
+  onOpen: () => void; onOpenInNewWindow: () => void; onUpdate: () => void; onDelete: () => void
 }) {
   const [hover, setHover] = useState(false)
   return (
@@ -135,6 +140,13 @@ function Row({ name, onOpen, onOpenInNewWindow, onUpdate, onDelete }: {
       onMouseLeave={() => setHover(false)}
       style={{ display: 'flex', alignItems: 'center', gap: 6, height: 38, padding: '0 8px', borderRadius: 7, background: hover ? 'var(--bg-hover)' : 'transparent' }}
     >
+      <div
+        onClick={onToggleDefault}
+        title={isDefault ? '既定を解除（Ctrl+Nで新規ウィンドウの初期表示に使われます）' : 'Ctrl+Nの既定に設定'}
+        style={{ width: 20, height: 20, flex: '0 0 20px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 5, cursor: 'default', fontSize: 13, color: isDefault ? 'var(--warn)' : 'var(--text-faint)' }}
+        onMouseEnter={e => { if (!isDefault) e.currentTarget.style.color = 'var(--text)' }}
+        onMouseLeave={e => { if (!isDefault) e.currentTarget.style.color = 'var(--text-faint)' }}
+      >{isDefault ? '★' : '☆'}</div>
       <span style={{ width: 16, height: 14, flex: '0 0 16px', borderRadius: 3, background: 'var(--accent-soft)', border: '1px solid var(--accent)' }} />
       <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
       {/* Non-destructive — doesn't touch this window's live state at all, so no confirmation needed. */}

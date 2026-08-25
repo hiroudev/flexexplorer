@@ -566,13 +566,13 @@ export async function unregisterGlobalShortcut(combo: string): Promise<void> {
  * on its URL; `initTauri()` picks that up and loads the workspace instead of
  * the usual session restore. Window labels are prefixed "workspace-" to
  * match the capability grant in src-tauri/capabilities/default.json. */
-export async function openWorkspaceInNewWindow(name: string): Promise<void> {
+export async function openWorkspaceInNewWindow(name?: string): Promise<void> {
   if (!isTauri) return
   const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow')
   const label = 'workspace-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
   new WebviewWindow(label, {
-    url: 'index.html?workspace=' + encodeURIComponent(name),
-    title: `FlexExplorer — ${name}`,
+    url: name ? 'index.html?workspace=' + encodeURIComponent(name) : 'index.html',
+    title: name ? `FlexExplorer — ${name}` : 'FlexExplorer',
     width: 1280,
     height: 800,
     minWidth: 880,

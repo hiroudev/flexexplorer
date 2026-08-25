@@ -79,6 +79,7 @@ export const ACTIONS: Record<string, (st: Store) => void> = {
   'cmd.palette': st => st.openPalette(),
   'cmd.options': st => st.openModal('options'),
   'cmd.workspaces': st => st.openModal('workspaces'),
+  'win.new': st => void st.openWorkspaceInNewWindow(st.defaultWorkspace ?? undefined),
   'view.density': st => {
     const i = DENSITIES.indexOf(st.opt.rowHeight)
     st.setOpt('rowHeight', DENSITIES[(i + 1) % DENSITIES.length])

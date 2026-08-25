@@ -81,7 +81,7 @@ export const QUICK_OPEN_CAPTURE_ID = '__quickOpenHotkey'
  * actually fire; an id listed here without one would show but do nothing. */
 const SHORTCUT_GROUPS = [
   { title: 'ナビゲーション', items: [['nav.up','上の項目へ','↑'],['nav.down','下の項目へ','↓'],['nav.parent','親フォルダへ','Alt+↑'],['nav.back','戻る','Alt+←'],['nav.forward','進む','Alt+→'],['nav.refresh','最新の情報に更新','F5'],['nav.open','開く / フォルダへ','Enter'],['nav.newtab','新しいタブ','Ctrl+T'],['nav.closetab','タブを閉じる','Ctrl+W'],['nav.address','パスを編集','Ctrl+L'],['cmd.goto','GoTo','Ctrl+G']] },
-  { title: '表示', items: [['view.inspector','Inspector を開閉','Space'],['cmd.palette','コマンドパレット','Ctrl+Shift+P'],['cmd.options','オプション','Ctrl+,'],['cmd.workspaces','ワークスペース','Ctrl+Shift+S'],['view.density','表示密度を切替','Ctrl+Shift+D'],['view.theme','テーマを切替','Ctrl+Shift+L'],['view.sidebar','サイドバーを開閉','Ctrl+B'],['view.hidden','隠しファイルを表示','Ctrl+H']] },
+  { title: '表示', items: [['view.inspector','Inspector を開閉','Space'],['cmd.palette','コマンドパレット','Ctrl+Shift+P'],['cmd.options','オプション','Ctrl+,'],['cmd.workspaces','ワークスペース','Ctrl+Shift+S'],['win.new','新規ウィンドウ','Ctrl+N'],['view.density','表示密度を切替','Ctrl+Shift+D'],['view.theme','テーマを切替','Ctrl+Shift+L'],['view.sidebar','サイドバーを開閉','Ctrl+B'],['view.hidden','隠しファイルを表示','Ctrl+H']] },
   { title: 'ペイン', items: [['view.split','ペインを切替','Ctrl+\\'],['pane.swap','ペインを入れ替え','Ctrl+Shift+X'],['pane.addright','右にペインを追加','Ctrl+Alt+→'],['pane.adddown','下にペインを追加','Ctrl+Alt+↓'],['pane.close','ペインを閉じる','Ctrl+Alt+X']] },
   { title: 'グループ / タブ', items: [['group.prev','前のグループへ','Ctrl+PageUp'],['group.next','次のグループへ','Ctrl+PageDown'],['group.reopen','閉じたグループを復元','Ctrl+Shift+G'],['tab.prev','前のタブへ','Ctrl+←'],['tab.next','次のタブへ','Ctrl+→'],['tab.reopen','閉じたタブを復元','Ctrl+Shift+T']] },
   { title: '編集', items: [['edit.selectall','すべて選択','Ctrl+A'],['edit.invertsel','選択を反転','Ctrl+Shift+A'],['edit.clearsel','選択を解除','Ctrl+Shift+N'],['edit.copy','コピー','Ctrl+C'],['edit.cut','切り取り','Ctrl+X'],['edit.paste','貼り付け','Ctrl+V'],['edit.rename','名前の変更','F2'],['edit.bulk','一括リネーム','Ctrl+Shift+R'],['edit.delete','削除','Del'],['edit.copypath','パスをコピー','Ctrl+Shift+C'],['edit.note','付箋メモ','Ctrl+M'],['edit.props','プロパティ','Alt+Enter']] },
@@ -346,8 +346,10 @@ interface Actions {
   applyWorkspace(data: SessionData): Promise<void>
   saveWorkspaceAs(name: string): Promise<void>
   loadNamedWorkspace(name: string): Promise<void>
-  /** Opens `name` in a brand-new window instead of replacing this one's live state. */
-  openWorkspaceInNewWindow(name: string): Promise<void>
+  /** Opens `name` in a brand-new window instead of replacing this one's live state.
+   * No name → a plain new window (used for Ctrl+N when no default is set). */
+  openWorkspaceInNewWindow(name?: string): Promise<void>
+  setDefaultWorkspace(name: string | null): void
   deleteNamedWorkspace(name: string): Promise<void>
   refreshWorkspaces(): Promise<void>
   // inline rename (F2 / slow second click on a selected row)
@@ -575,6 +577,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   renaming: null,
   extTools: { tortoiseSvn: false, winmerge: false },
   quickOpenHotkey: 'Ctrl+Alt+O',
+  defaultWorkspace: null,
   quickOpen: { open: false },
   genHighlight: false,
   genRules: [],
@@ -1187,8 +1190,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   closeTab: (pi, ti) => {
     const p = get().panes[pi]
     const t = p?.tabs[ti]
-    if (!p || p.tabs.length <= 1) return
+    if (!p) return
     if (t?.pinned) { get().showToast('ピン留めされたタブです'); return }
+    // Last tab in a pane: close the pane itself instead (if there's another
+    // pane to fall back to) rather than refusing outright.
+    if (p.tabs.length <= 1) { if (get().panes.length > 1) get().closePane(pi); return }
     set(s => {
       const panes = clonePanes(s.panes); const pp = panes[pi]
       pp.tabs.splice(ti, 1)
@@ -1889,10 +1895,13 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     set({ modal: null })
   },
 
+  setDefaultWorkspace: (name) => set({ defaultWorkspace: name }),
+
   deleteNamedWorkspace: async (name) => {
     try {
       await deleteWorkspace(name)
       await get().refreshWorkspaces()
+      if (get().defaultWorkspace === name) set({ defaultWorkspace: null })
       get().showToast(`「${name}」を削除しました`)
     } catch (err) { get().showToast('削除失敗: ' + String(err)) }
   },
@@ -2154,6 +2163,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     colFracs: s.colFracs,
     rowFracs: s.rowFracs,
     quickOpenHotkey: s.quickOpenHotkey,
+    defaultWorkspace: s.defaultWorkspace,
   }),
 }))
 
