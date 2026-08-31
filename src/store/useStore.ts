@@ -7,7 +7,7 @@ import type { ConflictChoice, TransferProgress, TransferDone } from '../fs/bridg
 import { fmt, fmtDate, hashStr, uidFor, applyRules, visibleIndices } from '../utils/fileUtils'
 import {
   isTauri, isRealPath, listDir, listDrives, homeDir, launchPath, openPath, splitPath, joinPath, renamePath,
-  planTransfer, startTransfer, cancelTransfer as bridgeCancelTransfer, siblingFolders,
+  planTransfer, startTransfer, cancelTransfer as bridgeCancelTransfer, siblingFolders, resolveTarget,
   deleteEntries, createFolder, createNewItem as bridgeCreateNewItem, searchDir, copyText,
   shellVerb, showShellContextMenu, createShortcut, resolveShortcut, createPathShortcutText, revealInExplorer, openInTerminal, openInVscode, duplicateAsDatedCopy,
   saveWorkspace, listWorkspaces, loadWorkspace, deleteWorkspace,
@@ -81,10 +81,10 @@ export const QUICK_OPEN_CAPTURE_ID = '__quickOpenHotkey'
  * actually fire; an id listed here without one would show but do nothing. */
 const SHORTCUT_GROUPS = [
   { title: 'ナビゲーション', items: [['nav.up','上の項目へ','↑'],['nav.down','下の項目へ','↓'],['nav.parent','親フォルダへ','Alt+↑'],['nav.back','戻る','Alt+←'],['nav.forward','進む','Alt+→'],['nav.refresh','最新の情報に更新','F5'],['nav.open','開く / フォルダへ','Enter'],['nav.newtab','新しいタブ','Ctrl+T'],['nav.closetab','タブを閉じる','Ctrl+W'],['nav.address','パスを編集','Ctrl+L'],['cmd.goto','GoTo','Ctrl+G']] },
-  { title: '表示', items: [['view.inspector','Inspector を開閉','Space'],['cmd.palette','コマンドパレット','Ctrl+Shift+P'],['cmd.options','オプション','Ctrl+,'],['cmd.workspaces','ワークスペース','Ctrl+Shift+S'],['win.new','新規ウィンドウ','Ctrl+N'],['view.density','表示密度を切替','Ctrl+Shift+D'],['view.theme','テーマを切替','Ctrl+Shift+L'],['view.sidebar','サイドバーを開閉','Ctrl+B'],['view.hidden','隠しファイルを表示','Ctrl+H']] },
+  { title: '表示', items: [['view.inspector','Inspector を開閉','Space'],['cmd.palette','コマンドパレット','Ctrl+Shift+P'],['cmd.options','オプション','Ctrl+,'],['cmd.workspaces','ワークスペース','Ctrl+Shift+S'],['cmd.guide','使いこなしガイド','F1'],['win.new','新規ウィンドウ','Ctrl+N'],['view.density','表示密度を切替','Ctrl+Shift+D'],['view.theme','テーマを切替','Ctrl+Shift+L'],['view.sidebar','サイドバーを開閉','Ctrl+B'],['view.hidden','隠しファイルを表示','Ctrl+H']] },
   { title: 'ペイン', items: [['view.split','ペインを切替','Ctrl+\\'],['pane.swap','ペインを入れ替え','Ctrl+Shift+X'],['pane.addright','右にペインを追加','Ctrl+Alt+→'],['pane.adddown','下にペインを追加','Ctrl+Alt+↓'],['pane.close','ペインを閉じる','Ctrl+Alt+X']] },
   { title: 'グループ / タブ', items: [['group.prev','前のグループへ','Ctrl+PageUp'],['group.next','次のグループへ','Ctrl+PageDown'],['group.reopen','閉じたグループを復元','Ctrl+Shift+G'],['tab.prev','前のタブへ','Ctrl+←'],['tab.next','次のタブへ','Ctrl+→'],['tab.reopen','閉じたタブを復元','Ctrl+Shift+T']] },
-  { title: '編集', items: [['edit.selectall','すべて選択','Ctrl+A'],['edit.invertsel','選択を反転','Ctrl+Shift+A'],['edit.clearsel','選択を解除','Ctrl+Shift+N'],['edit.copy','コピー','Ctrl+C'],['edit.cut','切り取り','Ctrl+X'],['edit.paste','貼り付け','Ctrl+V'],['edit.rename','名前の変更','F2'],['edit.bulk','一括リネーム','Ctrl+Shift+R'],['edit.delete','削除','Del'],['edit.copypath','パスをコピー','Ctrl+Shift+C'],['edit.note','付箋メモ','Ctrl+M'],['edit.props','プロパティ','Alt+Enter']] },
+  { title: '編集', items: [['edit.selectall','すべて選択','Ctrl+A'],['edit.invertsel','選択を反転','Ctrl+Shift+A'],['edit.clearsel','選択を解除','Ctrl+D'],['edit.copy','コピー','Ctrl+C'],['edit.cut','切り取り','Ctrl+X'],['edit.paste','貼り付け','Ctrl+V'],['edit.pastepath','パスを貼り付けて開く','Ctrl+Shift+V'],['edit.rename','名前の変更','F2'],['edit.bulk','一括リネーム','Ctrl+Shift+R'],['edit.delete','削除','Del'],['edit.copypath','パスをコピー','Ctrl+Shift+C'],['edit.note','付箋メモ','Ctrl+M'],['edit.newfolder','新しいフォルダー','Ctrl+Shift+N'],['edit.props','プロパティ','Alt+Enter']] },
   { title: '検索', items: [['find.filter','フィルタ検索','Ctrl+F'],['find.global','グローバル検索','Ctrl+Shift+F']] },
 ]
 
@@ -220,6 +220,8 @@ interface Actions {
   swapPathSegment(pi: number, ci: number, name: string): Promise<void>
   navSidebar(label: string): void
   navPath(path: string, other?: boolean): void
+  revealPath(pi: number, raw: string): Promise<void>
+  openClipboardPath(): Promise<void>
   initTauri(): Promise<void>
   loadDrives(): Promise<void>
   // file operations (Tauri)
@@ -241,6 +243,7 @@ interface Actions {
   acceptConfirm(): Promise<void>
   copyPathToClipboard(): Promise<void>
   createNewFolder(): Promise<void>
+  focusByName(pi: number, abs: string, rename?: boolean): void
   createNewItem(kind: string): Promise<void>
   duplicateSelectedAsDatedCopy(): Promise<void>
   // bookmarks
@@ -340,7 +343,7 @@ interface Actions {
   ctxSearch(q: string): void
   togglePin(id: string): void
   // modal
-  openModal(m: 'rename' | 'options' | 'workspaces'): void
+  openModal(m: 'rename' | 'options' | 'workspaces' | 'guide'): void
   closeModal(): void
   // workspaces (named layout files)
   applyWorkspace(data: SessionData): Promise<void>
@@ -760,13 +763,40 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   },
 
   navPath: (path, other) => {
+    const pi = other ? (get().activePane === 0 ? 1 : 0) : get().activePane
+    void get().revealPath(pi, path)
+  },
+
+  /** Goes to `raw`. A path naming a *file* opens its folder and selects the
+   * file, so pasting `\server\share\ファイル名.xlsx` lands on the file
+   * rather than failing. Shared by the address bar, GoTo and クイックオープン. */
+  revealPath: async (pi, raw) => {
+    const path = raw.trim().replace(/^"|"$/g, '')
+    if (!path) return
     const segs = splitPath(path)
-    if (isTauri && isRealPath(segs)) {
-      const pi = other ? (get().activePane === 0 ? 1 : 0) : get().activePane
-      void get().navigate(pi, segs)
-    } else {
-      get().showToast('移動: ' + path)
+    if (!isTauri) { get().showToast('移動: ' + path); return }
+    const dir = await resolveTarget(path)
+    if (!dir) {
+      // Not on disk: fall back to navigating as typed, so the usual
+      // "開けません" error comes from one place.
+      if (isRealPath(segs)) await get().navigate(pi, segs)
+      else get().showToast('見つかりません: ' + path)
+      return
     }
+    await get().navigate(pi, splitPath(dir))
+    // resolve_target returned the parent → `path` was a file; select it.
+    if (dir.toLowerCase() !== path.replace(/[\\\/]+$/, '').toLowerCase()) {
+      get().focusByName(pi, path)
+    }
+  },
+
+  /** Reads a path off the OS clipboard and reveals it (Ctrl+Shift+V). */
+  openClipboardPath: async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      if (!text.trim()) { get().showToast('クリップボードにパスがありません'); return }
+      await get().revealPath(get().activePane, text)
+    } catch { get().showToast('クリップボードを読めません') }
   },
 
   loadDrives: async () => {
@@ -812,6 +842,18 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
         await get().navigate(1, root, { push: false })
         set({ activePane: 0 })
         return
+      }
+
+      // A default workspace, if one is pinned (WorkspacesModal's ☆). Beats the
+      // session restore: pinning one says "this is what I start from".
+      const def = get().defaultWorkspace
+      if (def) {
+        try {
+          const json = await loadWorkspace(def)
+          await get().applyWorkspace(JSON.parse(json) as SessionData)
+          set({ activePane: 0 })
+          return
+        } catch (err) { get().showToast(`既定のワークスペース「${def}」を読めません: ` + String(err)) }
       }
 
       // Restore the previous session if enabled.
@@ -988,15 +1030,33 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     get().showToast(ok ? 'パスをコピーしました' : 'パスのコピーに失敗')
   },
 
+  /** Selects the entry named by `abs` in pane `pi`, scrolling isn't needed
+   * since the list re-renders around the focus. With `rename`, opens the
+   * inline editor on it — what Explorer does right after 新規作成. */
+  focusByName: (pi, abs, rename) => {
+    const name = splitPath(abs).slice(-1)[0]
+    const st = get()
+    const p = st.panes[pi]
+    const idx = p.tabs[p.active].files.findIndex(f => f.name === name)
+    if (idx < 0) return
+    set(s => {
+      const panes = clonePanes(s.panes)
+      const t = panes[pi].tabs[panes[pi].active]
+      t.focus = idx; t.sel = [idx]
+      return { panes, activePane: pi }
+    })
+    if (rename) get().startRename(pi, idx)
+  },
+
   createNewFolder: async () => {
     const s = get()
     const pi = s.activePane
     const t = activeTab(s)
     if (!isTauri || !isRealPath(t.path)) { get().showToast('新しいフォルダー'); return }
     try {
-      await createFolder(t.path, '新しいフォルダー')
+      const abs = await createFolder(t.path, '新しいフォルダー')
       await get().navigate(pi, t.path, { push: false })
-      get().showToast('フォルダーを作成しました')
+      get().focusByName(pi, abs, true)
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
   },
 
@@ -1006,9 +1066,9 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const t = activeTab(s)
     if (!isTauri || !isRealPath(t.path)) { get().showToast('新規作成'); return }
     try {
-      await bridgeCreateNewItem(t.path, kind)
+      const abs = await bridgeCreateNewItem(t.path, kind)
       await get().navigate(pi, t.path, { push: false })
-      get().showToast('作成しました')
+      get().focusByName(pi, abs, true)
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
   },
 
@@ -2105,7 +2165,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const segs = splitPath(path)
     if (isTauri && isRealPath(segs)) {
       const pi = other ? (get().activePane === 0 ? 1 : 0) : get().activePane
-      void get().navigate(pi, segs)
+      void get().revealPath(pi, path)
       return
     }
     get().showToast('移動: ' + path + (other ? '（別パネル）' : ''))

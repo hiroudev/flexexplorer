@@ -115,3 +115,29 @@ export function applyRules(files: FileEntry[], rules: RenameRule[]): string[] {
     return base + ext
   })
 }
+
+/** Leading tree-drawing decoration on a pasted line: box characters, ASCII
+ * fallbacks, bullets, and the indentation around them. */
+const TREE_PREFIX = /^[\s\u3000|+\-*.]*[└┗├┣│┃─━┌┏|`+\-*]+[\s\u3000─━]*/
+
+/** Turns pasted text into one absolute path.
+ *
+ * Paths get quoted, wrapped and drawn as trees on the way through chat and
+ * documents, so what lands on the clipboard is rarely a bare path:
+ *
+ *     \hoge\fuga
+ *     └ファイル名.xlsx
+ *
+ * Every line after the first is treated as one level deeper and appended with
+ * its decoration stripped. Indentation depth is deliberately ignored: the
+ * shapes people actually paste are a single chain, and guessing at depth would
+ * turn a wrong guess into a wrong folder. */
+export function parsePastedPath(text: string): string {
+  const lines = text.split(/\r?\n/)
+    .map(l => l.replace(TREE_PREFIX, '').trim().replace(/^"|"$/g, ''))
+    .filter(Boolean)
+  if (!lines.length) return ''
+  const [head, ...rest] = lines
+  const sep = head.includes('/') && !head.includes('\\') ? '/' : '\\'
+  return [head.replace(/[\\\/]+$/, ''), ...rest].join(sep)
+}

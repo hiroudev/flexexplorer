@@ -272,6 +272,26 @@ export async function createShortcut(absPath: string, destDir?: string): Promise
   return invoke<string>('create_shortcut', { target: absPath, destDir: destDir ?? null })
 }
 
+/** Hands `paths` to the OS as a native file drag, so they can be dropped on
+ * Explorer, a mail client, or anything else that accepts files.
+ *
+ * Independent of `dragDropEnabled` (that setting governs the webview's *drop*
+ * target; this is a drag source in our own process). The OS call blocks until
+ * the drop finishes, so the window is unresponsive while dragging — a known
+ * limitation of DoDragDrop, not something to fix here. */
+export async function dragOut(paths: string[]): Promise<void> {
+  if (!isTauri || !paths.length) return
+  const { startDrag } = await import('@crabnebula/tauri-plugin-drag')
+  await startDrag({ item: paths, icon: '' })
+}
+
+/** Folder to show for `path`: itself if a directory, its parent if a file,
+ * null if it doesn't exist. */
+export async function resolveTarget(path: string): Promise<string | null> {
+  if (!isTauri) return null
+  return invoke<string | null>('resolve_target', { path })
+}
+
 /** One option for swapping a path segment while keeping the segments below it
  * (see `siblingFolders`). */
 export interface Sibling {

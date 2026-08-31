@@ -32,6 +32,11 @@ pub fn run() {
         // driven from the frontend (see fs/bridge.ts registerGlobalShortcut),
         // this just wires up the plugin runtime.
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // Dragging files out to Explorer/other apps. Safe to add alongside the
+        // in-app HTML5 drag-and-drop: this is a drag *source* (DoDragDrop from
+        // our own process) and doesn't touch the webview's drop target, which
+        // is what `dragDropEnabled: true` would have hijacked.
+        .plugin(tauri_plugin_drag::init())
         .invoke_handler(tauri::generate_handler![
             fs::list_dir,
             fs::list_drives,
@@ -41,6 +46,7 @@ pub fn run() {
             fs::read_text_preview,
             fs::read_xlsx_preview,
             fs::sibling_folders,
+            fs::resolve_target,
             transfer::plan_transfer,
             transfer::start_transfer,
             transfer::cancel_transfer,

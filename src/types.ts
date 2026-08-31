@@ -145,7 +145,7 @@ export interface ColumnDef {
   w: number // pixel width (used as flex-basis min for 'name')
 }
 
-export type Modal = 'rename' | 'options' | 'workspaces' | null
+export type Modal = 'rename' | 'options' | 'workspaces' | 'guide' | null
 export type OptTab = 'appearance' | 'shortcuts' | 'files' | 'generations' | 'default' | 'win' | 'advanced'
 
 export interface AppState {

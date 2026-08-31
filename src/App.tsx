@@ -11,6 +11,7 @@ import Toast from './components/Toast'
 import RenameModal from './components/modals/RenameModal'
 import OptionsModal from './components/modals/OptionsModal'
 import WorkspacesModal from './components/modals/WorkspacesModal'
+import GuideModal from './components/modals/GuideModal'
 import CommandPalette from './components/overlays/CommandPalette'
 import GoToOverlay from './components/overlays/GoToOverlay'
 import QuickOpenOverlay from './components/overlays/QuickOpenOverlay'
@@ -97,7 +98,7 @@ export default function App() {
       // These few reach in from anywhere, including from inside a text field,
       // because they're how you get *out* to another surface.
       if (combo && (combo === binds['cmd.palette'] || combo === binds['cmd.options'] ||
-          combo === binds['cmd.goto'] || combo === binds['cmd.workspaces'])) {
+          combo === binds['cmd.goto'] || combo === binds['cmd.workspaces'] || combo === binds['cmd.guide'])) {
         e.preventDefault(); runBinding(combo, binds, useStore); return
       }
 
@@ -182,6 +183,7 @@ export default function App() {
       <RenameModal />
       <OptionsModal />
       <WorkspacesModal />
+      <GuideModal />
       <CommandPalette />
       <GoToOverlay />
       <QuickOpenOverlay />

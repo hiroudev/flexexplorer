@@ -3,6 +3,7 @@ import { useStore, NOTE_MIN_H, NOTE_MAX_H, navAvailability } from '../store/useS
 import { iconOf, visibleIndices, fmt } from '../utils/fileUtils'
 import { PANE_MIME } from './LayoutTabs'
 import SegmentSwitcher from './SegmentSwitcher'
+import { dragOut } from '../fs/bridge'
 import { latestGenerationIndices } from '../utils/generations'
 import { shellIcon, peekIcon, joinPath, splitPath, noteKey, copyText } from '../fs/bridge'
 import type { Pane, FileEntry, ColumnDef, ColumnId } from '../types'
@@ -211,6 +212,13 @@ function FileRow({ file, idx, pi, cols, gridCols, isActive, selected, focused, t
         // otherwise the whole selection travels together.
         const paths = selected && selectedAbs.length ? selectedAbs : [abs]
         if (!selected) selectFile(pi, idx, e as unknown as React.MouseEvent)
+        // Alt+drag hands the files to the OS instead, so they can be dropped
+        // on other apps. The in-app drag stays on the plain gesture.
+        if (e.altKey) {
+          e.preventDefault()
+          void dragOut(paths)
+          return
+        }
         filesDrag = { pi, paths }
         e.dataTransfer.effectAllowed = 'copyMove'
         e.dataTransfer.setData(FILE_MIME, JSON.stringify({ pi, paths }))

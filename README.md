@@ -4,7 +4,7 @@ Windows向けのカスタムファイルエクスプローラー。分割パネ�
 
 ## ダウンロード
 
-**[最新版をダウンロード](https://github.com/hiroudev/flexexplorer/releases/latest)**(`.msi` または `.exe`)
+**[最新版をダウンロード](https://github.com/hiroudev/flexexplorer/releases/latest)**（`.exe` インストーラー）
 
 ## 特徴
 
@@ -32,7 +32,7 @@ Tauri 2 + React + TypeScript 製。
 ```bash
 npm install
 npm run tauri:dev    # 開発起動
-npm run tauri:build  # .msi / .exe を生成(src-tauri/target/release/bundle/ 配下)
+npm run tauri:build  # .exe インストーラーを生成(src-tauri/target/release/bundle/nsis/ 配下)
 ```
 
 Rust ツールチェーン([rustup](https://rustup.rs/))と Node.js が別途必要。

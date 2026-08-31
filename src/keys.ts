@@ -79,6 +79,7 @@ export const ACTIONS: Record<string, (st: Store) => void> = {
   'cmd.palette': st => st.openPalette(),
   'cmd.options': st => st.openModal('options'),
   'cmd.workspaces': st => st.openModal('workspaces'),
+  'cmd.guide': st => st.openModal('guide'),
   'win.new': st => void st.openWorkspaceInNewWindow(st.defaultWorkspace ?? undefined),
   'view.density': st => {
     const i = DENSITIES.indexOf(st.opt.rowHeight)
@@ -112,6 +113,7 @@ export const ACTIONS: Record<string, (st: Store) => void> = {
   'edit.copy': st => st.copyToClip(),
   'edit.cut': st => st.cutToClip(),
   'edit.paste': st => void st.paste(),
+  'edit.pastepath': st => void st.openClipboardPath(),
   'edit.rename': st => {
     // A lone selection renames inline; a multi-selection has no inline form,
     // so it goes to the bulk tool instead.
@@ -124,6 +126,7 @@ export const ACTIONS: Record<string, (st: Store) => void> = {
   'edit.delete': st => void st.deleteSelected(),
   'edit.copypath': st => void st.copyPathToClipboard(),
   'edit.note': st => st.addNote(),
+  'edit.newfolder': st => void st.createNewFolder(),
   'edit.props': st => st.shellProperties(),
 
   // search

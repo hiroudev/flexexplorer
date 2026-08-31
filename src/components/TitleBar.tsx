@@ -98,6 +98,8 @@ function buildMenus(): { title: string; items: MenuItem[] }[] {
     },
     {
       title: 'ヘルプ', items: [
+        { type: 'item', label: '使いこなしガイド', key: 'F1', run: () => s().openModal('guide') },
+        { type: 'sep' },
         { type: 'item', label: 'コマンドパレット', key: 'Ctrl+Shift+P', run: () => s().openPalette() },
         { type: 'sep' },
         { type: 'item', label: 'FlexExplorer について', run: () => s().showToast('FlexExplorer v0.1.0') },

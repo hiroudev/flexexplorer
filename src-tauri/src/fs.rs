@@ -171,6 +171,14 @@ pub fn resolve_launch_target(raw: &str) -> Option<String> {
     }
 }
 
+/// Folder to show for an arbitrary path: a directory as-is, a file's parent,
+/// `None` if it doesn't exist. Lets the frontend turn a pasted
+/// `\server\shareile.xlsx` into "open that folder, select that file".
+#[tauri::command]
+pub fn resolve_target(path: String) -> Option<String> {
+    resolve_launch_target(&path)
+}
+
 /// A folder to show on startup instead of the usual session restore, passed
 /// as this process's first command-line argument — e.g. a launcher (BlueWind's
 /// "フォルダを開くファイラー"設定) or FlexFind's "FlexExplorerで表示"
