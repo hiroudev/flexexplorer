@@ -65,7 +65,8 @@ pub fn create_path_shortcut_text(target: String, dest_dir: Option<String>) -> Re
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "item".into());
-    let file = crate::fs::unique_target(&dir.join(format!("{name}へのショートカット.txt")));
+    let file = crate::fs::unique_target(&dir.join(format!("{name}へのショートカット.txt")))
+        .ok_or("同じ名前のファイルが多すぎます")?;
     std::fs::write(&file, &target).map_err(|e| e.to_string())?;
     Ok(file.to_string_lossy().to_string())
 }
@@ -210,6 +211,27 @@ mod win {
     };
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
+    /// Initialises COM for the current thread and uninitialises it on drop —
+    /// but only if this scope is the one that initialised it. Calling
+    /// `CoUninitialize` after a failed `CoInitializeEx` (RPC_E_CHANGED_MODE)
+    /// would decrement somebody else's reference count.
+    pub struct ComScope(bool);
+
+    impl ComScope {
+        pub fn enter() -> Self {
+            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            ComScope(hr.is_ok())
+        }
+    }
+
+    impl Drop for ComScope {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
@@ -241,6 +263,9 @@ mod win {
     }
 
     pub fn shell_verb(path: &str, verb: &str) -> Result<(), String> {
+        // SEE_MASK_INVOKEIDLIST loads shell extensions, which need COM on this
+        // thread — the other entry points here already initialise it.
+        let com = ComScope::enter();
         let wpath = wide(path);
         let wverb = wide(verb);
         let mut info = SHELLEXECUTEINFOW::default();
@@ -249,7 +274,15 @@ mod win {
         info.lpVerb = PCWSTR(wverb.as_ptr());
         info.lpFile = PCWSTR(wpath.as_ptr());
         info.nShow = SW_SHOWNORMAL.0;
-        unsafe { ShellExecuteExW(&mut info).map_err(|e| e.to_string()) }
+        let r = unsafe { ShellExecuteExW(&mut info) };
+        drop(com);
+        match r {
+            Ok(()) => Ok(()),
+            // "runas" answered with No, or any other dialog the user dismissed:
+            // they cancelled, which isn't a failure to report as one.
+            Err(e) if e.code().0 as u32 == 0x8007_04C7 => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     fn unique_lnk(dir: &Path, stem: &str) -> PathBuf {
@@ -345,10 +378,13 @@ mod win {
                     .map_err(|e| e.to_string())?;
 
                 let menu: HMENU = CreatePopupMenu().map_err(|e| e.to_string())?;
-                context_menu
+                if let Err(e) = context_menu
                     .QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_EXPLORE)
                     .ok()
-                    .map_err(|e| e.to_string())?;
+                {
+                    let _ = DestroyMenu(menu);
+                    return Err(e.to_string());
+                }
 
                 let _ = SetForegroundWindow(hwnd);
                 let cmd = TrackPopupMenuEx(

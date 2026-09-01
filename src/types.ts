@@ -167,7 +167,9 @@ export interface AppState {
   modal: Modal
   optTab: OptTab
   toast: string | null
-  undo: string | null
+  /** Offered by the toast's ↩ button. Only actions that can genuinely be
+   * undone set this — a label alone would promise something nothing delivers. */
+  undo: { label: string; kind: 'group' } | null
   capturing: string | null
   binds: Record<string, string>
   rename: { rules: RenameRule[]; addOpen: boolean }
@@ -223,8 +225,7 @@ export interface AppState {
     title: string
     body: string
     okLabel: string
-    /** Only 'delete' for now; keeps the pending action serialisable. */
-    kind: 'delete'
+    kind: 'delete' | 'delete-permanent'
     paths: string[]
   } | null
   /** Highlight the newest file of each generation set (see utils/generations). */

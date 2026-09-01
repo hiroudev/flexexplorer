@@ -173,7 +173,7 @@ pub fn resolve_launch_target(raw: &str) -> Option<String> {
 
 /// Folder to show for an arbitrary path: a directory as-is, a file's parent,
 /// `None` if it doesn't exist. Lets the frontend turn a pasted
-/// `\server\shareile.xlsx` into "open that folder, select that file".
+/// a pasted UNC path into "open that folder, select that file".
 #[tauri::command]
 pub fn resolve_target(path: String) -> Option<String> {
     resolve_launch_target(&path)
@@ -347,24 +347,37 @@ pub fn rename_path(from: String, to: String) -> Result<String, String> {
 
 // ---- copy / move / delete / create ----
 
-/// Pick a non-colliding target path by inserting " (2)", " (3)", … before the
-/// extension when the desired path already exists.
 /// Whether two paths denote the same existing entry — compared canonically so
 /// differing case, trailing separators, or `.`/`..` segments don't fool it.
-fn same_entry(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_entry(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
     }
 }
 
-pub(crate) fn unique_target(desired: &Path) -> PathBuf {
+/// Pick a non-colliding target path by inserting " (2)", " (3)", … before the
+/// extension when the desired path already exists.
+///
+/// `None` when every candidate is taken. Callers must not fall back to the
+/// desired path in that case: writing there would overwrite the very file the
+/// caller asked to keep.
+pub(crate) fn unique_target(desired: &Path) -> Option<PathBuf> {
     if !desired.exists() {
-        return desired.to_path_buf();
+        return Some(desired.to_path_buf());
     }
     let parent = desired.parent().unwrap_or_else(|| Path::new("."));
-    let stem = desired.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let ext = desired.extension().map(|s| s.to_string_lossy().to_string());
+    // A folder called "10:2026.基本設計" has no extension, whatever
+    // `Path::extension` says — only split one off when the entry is a file.
+    let is_file = desired.is_file();
+    let stem = if is_file { desired.file_stem() } else { desired.file_name() }
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = if is_file {
+        desired.extension().map(|s| s.to_string_lossy().to_string())
+    } else {
+        None
+    };
     for i in 2..10_000 {
         let fname = match &ext {
             Some(e) => format!("{stem} ({i}).{e}"),
@@ -372,10 +385,10 @@ pub(crate) fn unique_target(desired: &Path) -> PathBuf {
         };
         let cand = parent.join(fname);
         if !cand.exists() {
-            return cand;
+            return Some(cand);
         }
     }
-    desired.to_path_buf()
+    None
 }
 
 fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -417,7 +430,9 @@ pub fn copy_entries(paths: Vec<String>, dest_dir: String) -> Result<u32, String>
         if same_entry(&src, &desired) {
             continue;
         }
-        let target = unique_target(&desired);
+        crate::transfer::check_not_inside(&src, &dest)?;
+        let target = unique_target(&desired)
+            .ok_or_else(|| format!("{}: 名前を変えて保存できません", desired.to_string_lossy()))?;
         copy_recursive(&src, &target).map_err(|e| e.to_string())?;
         n += 1;
     }
@@ -439,7 +454,9 @@ pub fn move_entries(paths: Vec<String>, dest_dir: String) -> Result<u32, String>
         if same_entry(&src, &desired) {
             continue;
         }
-        let target = unique_target(&desired);
+        crate::transfer::check_not_inside(&src, &dest)?;
+        let target = unique_target(&desired)
+            .ok_or_else(|| format!("{}: 名前を変えて保存できません", desired.to_string_lossy()))?;
         // Fast path: same-volume rename. Fall back to copy + delete across volumes.
         if std::fs::rename(&src, &target).is_err() {
             copy_recursive(&src, &target).map_err(|e| e.to_string())?;
@@ -468,7 +485,8 @@ pub fn delete_entries(paths: Vec<String>, permanent: bool) -> Result<u32, String
 /// Create a new folder inside `dir`. Returns the created absolute path.
 #[tauri::command]
 pub fn create_folder(dir: String, name: String) -> Result<String, String> {
-    let target = unique_target(&PathBuf::from(&dir).join(&name));
+    let target = unique_target(&PathBuf::from(&dir).join(&name))
+        .ok_or("同じ名前のファイルが多すぎます")?;
     std::fs::create_dir(&target).map_err(|e| e.to_string())?;
     Ok(target.to_string_lossy().to_string())
 }
@@ -485,7 +503,8 @@ pub fn create_new_item(dir: String, kind: String) -> Result<String, String> {
     let dir_path = PathBuf::from(&dir);
 
     if kind == "folder" {
-        let target = unique_target(&dir_path.join("新しいフォルダー"));
+        let target = unique_target(&dir_path.join("新しいフォルダー"))
+            .ok_or("同じ名前のフォルダーが多すぎます")?;
         std::fs::create_dir(&target).map_err(|e| e.to_string())?;
         return Ok(target.to_string_lossy().to_string());
     }
@@ -497,7 +516,8 @@ pub fn create_new_item(dir: String, kind: String) -> Result<String, String> {
         "pptx" => "新しい PowerPoint プレゼンテーション",
         _ => "新しいファイル",
     };
-    let target = unique_target(&dir_path.join(format!("{base_name}.{kind}")));
+    let target = unique_target(&dir_path.join(format!("{base_name}.{kind}")))
+        .ok_or("同じ名前のファイルが多すぎます")?;
 
     if kind == "txt" {
         std::fs::write(&target, []).map_err(|e| e.to_string())?;

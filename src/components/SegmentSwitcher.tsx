@@ -77,11 +77,18 @@ export default function SegmentSwitcher({ pi, path, ci, anchor, onClose }: {
   }
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClose(); return }
-    if (e.key === 'ArrowDown') { e.preventDefault(); setSel(s => Math.min(visible.length - 1, s + 1)); return }
-    if (e.key === 'ArrowUp') { e.preventDefault(); setSel(s => Math.max(0, s - 1)); return }
-    if (e.key === 'Enter') {
+    // Every key handled here must also stop propagating: React dispatches from
+    // the document root, so anything left to bubble reaches App.tsx's global
+    // handler as well — Enter would open whatever is selected in the list
+    // behind this panel, and ↑↓ would move that selection.
+    if (e.key === 'Escape' || e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter') {
       e.preventDefault()
+      e.stopPropagation()
+    }
+    if (e.key === 'Escape') { onClose(); return }
+    if (e.key === 'ArrowDown') { setSel(s => Math.min(visible.length - 1, s + 1)); return }
+    if (e.key === 'ArrowUp') { setSel(s => Math.max(0, s - 1)); return }
+    if (e.key === 'Enter') {
       const pick = visible[sel]
       if (pick) choose(pick.name)
     }

@@ -210,7 +210,13 @@ function FileRow({ file, idx, pi, cols, gridCols, isActive, selected, focused, t
         cancelPendingRename()
         // Dragging a row outside the current selection drags just that row —
         // otherwise the whole selection travels together.
-        const paths = selected && selectedAbs.length ? selectedAbs : [abs]
+        // Ctrl+drag on an unselected row adds it to the selection, so what
+        // travels should be that whole selection — not just the row grabbed.
+        const paths = selected && selectedAbs.length
+          ? selectedAbs
+          : (e.ctrlKey || e.metaKey) && selectedAbs.length
+            ? [...selectedAbs, abs]
+            : [abs]
         if (!selected) selectFile(pi, idx, e as unknown as React.MouseEvent)
         // Alt+drag hands the files to the OS instead, so they can be dropped
         // on other apps. The in-app drag stays on the plain gesture.
@@ -839,6 +845,10 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
             if (!e.dataTransfer.types.includes(FILE_MIME)) return
             e.preventDefault()
             const { pi: srcPi, paths } = JSON.parse(e.dataTransfer.getData(FILE_MIME)) as { pi: number; paths: string[] }
+            // Same guard as the folder rows: dropping a folder into its own
+            // subtree would have the copy walk into what it is creating.
+            const low = dirAbs.toLowerCase()
+            if (paths.some(p => low === p.toLowerCase() || low.startsWith(p.toLowerCase() + '\\'))) return
             // Anywhere in the empty list means "into the folder being shown".
             void dropOnFolder(tab.path, paths, dropMode(e, dirAbs, paths[0]), srcPi)
           }}

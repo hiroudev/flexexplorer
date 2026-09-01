@@ -6,10 +6,17 @@
 
 import type { FileEntry, GenerationRule } from '../types'
 
-/** Digits, optionally carrying a single-letter revision suffix (`20260818a`).
- * Everything matched here is what varies *between* generations, so removing it
- * is what makes two generations collapse onto the same key. */
-const STAMP = /\d+[A-Za-z]?/g
+/** A date-like run of digits (8 for YYYYMMDD, 6 for YYMMDD…), optionally
+ * carrying a single-letter revision suffix: `20260818`, `20260818a`.
+ *
+ * Only runs this long count. Stripping *every* digit would fold `会議室1_予約`
+ * and `会議室2_予約` into one set — different rooms, not two versions of one
+ * document. */
+const DATE_STAMP = /\d{4,}[A-Za-z]?/g
+
+/** A short revision number in the trailing position: the `_01` of
+ * `A_20260818_01`. Anchored to the end so an inner `1` is left alone. */
+const REV_SUFFIX = /[ _\-]\d{1,3}[A-Za-z]?$/
 
 /** Runs of separators left behind once the stamps are gone. */
 const SEP_RUN = /[ _\-.]{2,}/g
@@ -20,7 +27,11 @@ export function autoKey(name: string): string {
   const dot = name.lastIndexOf('.')
   const base = dot > 0 ? name.slice(0, dot) : name
   const ext = dot > 0 ? name.slice(dot) : ''
-  const stripped = base.replace(STAMP, '').replace(SEP_RUN, '_')
+  const stripped = base
+    .replace(DATE_STAMP, '')
+    .replace(REV_SUFFIX, '')
+    .replace(SEP_RUN, '_')
+    .replace(/[ _\-]+$/, '')
   return (stripped + ext).toLowerCase()
 }
 
@@ -96,7 +107,11 @@ export function previewGroups(files: FileEntry[], rules: GenerationRule[]): { ke
     .map(([key, v]) => ({
       key,
       names: [...v]
-        .sort((a, b) => (stamp(b).localeCompare(stamp(a)) || b.name.localeCompare(a.name)))
+        // Same ordering the highlight uses, so the preview's ● marks the row
+        // the list actually highlights.
+        .sort((a, b) => (stamp(a) === stamp(b)
+          ? (a.name < b.name ? 1 : a.name > b.name ? -1 : 0)
+          : (stamp(a) < stamp(b) ? 1 : -1)))
         .map(f => f.name),
     }))
 }

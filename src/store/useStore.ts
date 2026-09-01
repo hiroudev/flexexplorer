@@ -4,7 +4,7 @@ import { THEMES } from 'flex-design/themes/presets.js'
 import { applyTheme } from 'flex-design/runtime/theme.js'
 import type { AppState, FileEntry, Pane, PaneTab, RenameRule, OptTab, ColumnId, LayoutGroup, FolderNote, GenerationRule } from '../types'
 import type { ConflictChoice, TransferProgress, TransferDone } from '../fs/bridge'
-import { fmt, fmtDate, hashStr, uidFor, applyRules, visibleIndices } from '../utils/fileUtils'
+import { fmt, fmtDate, hashStr, uidFor, applyRules, visibleIndices, parsePastedPath } from '../utils/fileUtils'
 import {
   isTauri, isRealPath, listDir, listDrives, homeDir, launchPath, openPath, splitPath, joinPath, renamePath,
   planTransfer, startTransfer, cancelTransfer as bridgeCancelTransfer, siblingFolders, resolveTarget,
@@ -84,7 +84,7 @@ const SHORTCUT_GROUPS = [
   { title: '表示', items: [['view.inspector','Inspector を開閉','Space'],['cmd.palette','コマンドパレット','Ctrl+Shift+P'],['cmd.options','オプション','Ctrl+,'],['cmd.workspaces','ワークスペース','Ctrl+Shift+S'],['cmd.guide','使いこなしガイド','F1'],['win.new','新規ウィンドウ','Ctrl+N'],['view.density','表示密度を切替','Ctrl+Shift+D'],['view.theme','テーマを切替','Ctrl+Shift+L'],['view.sidebar','サイドバーを開閉','Ctrl+B'],['view.hidden','隠しファイルを表示','Ctrl+H']] },
   { title: 'ペイン', items: [['view.split','ペインを切替','Ctrl+\\'],['pane.swap','ペインを入れ替え','Ctrl+Shift+X'],['pane.addright','右にペインを追加','Ctrl+Alt+→'],['pane.adddown','下にペインを追加','Ctrl+Alt+↓'],['pane.close','ペインを閉じる','Ctrl+Alt+X']] },
   { title: 'グループ / タブ', items: [['group.prev','前のグループへ','Ctrl+PageUp'],['group.next','次のグループへ','Ctrl+PageDown'],['group.reopen','閉じたグループを復元','Ctrl+Shift+G'],['tab.prev','前のタブへ','Ctrl+←'],['tab.next','次のタブへ','Ctrl+→'],['tab.reopen','閉じたタブを復元','Ctrl+Shift+T']] },
-  { title: '編集', items: [['edit.selectall','すべて選択','Ctrl+A'],['edit.invertsel','選択を反転','Ctrl+Shift+A'],['edit.clearsel','選択を解除','Ctrl+D'],['edit.copy','コピー','Ctrl+C'],['edit.cut','切り取り','Ctrl+X'],['edit.paste','貼り付け','Ctrl+V'],['edit.pastepath','パスを貼り付けて開く','Ctrl+Shift+V'],['edit.rename','名前の変更','F2'],['edit.bulk','一括リネーム','Ctrl+Shift+R'],['edit.delete','削除','Del'],['edit.copypath','パスをコピー','Ctrl+Shift+C'],['edit.note','付箋メモ','Ctrl+M'],['edit.newfolder','新しいフォルダー','Ctrl+Shift+N'],['edit.props','プロパティ','Alt+Enter']] },
+  { title: '編集', items: [['edit.selectall','すべて選択','Ctrl+A'],['edit.invertsel','選択を反転','Ctrl+Shift+A'],['edit.clearsel','選択を解除','Ctrl+D'],['edit.copy','コピー','Ctrl+C'],['edit.cut','切り取り','Ctrl+X'],['edit.paste','貼り付け','Ctrl+V'],['edit.pastepath','パスを貼り付けて開く','Ctrl+Shift+V'],['edit.rename','名前の変更','F2'],['edit.bulk','一括リネーム','Ctrl+Shift+R'],['edit.delete','削除','Del'],['edit.deleteperm','完全に削除','Shift+Del'],['edit.copypath','パスをコピー','Ctrl+Shift+C'],['edit.note','付箋メモ','Ctrl+M'],['edit.newfolder','新しいフォルダー','Ctrl+Shift+N'],['edit.props','プロパティ','Alt+Enter']] },
   { title: '検索', items: [['find.filter','フィルタ検索','Ctrl+F'],['find.global','グローバル検索','Ctrl+Shift+F']] },
 ]
 
@@ -189,8 +189,19 @@ function makePaneForPath(path: string): Pane {
 }
 
 /** Absolute paths of the currently selected entries (handles search results). */
-function selectedAbs(t: PaneTab): string[] {
-  return t.sel.map(i => t.files[i]).filter(Boolean).map(f => f.abs || joinPath([...t.path, f.name]))
+/** Absolute paths of the selection — restricted to the rows actually on
+ * screen. A selection outlives the filter and the hidden-files setting, so
+ * without this, selecting everything and then typing a filter would still
+ * delete or copy the rows that scrolled out of sight. */
+function selectedAbs(t: PaneTab, s?: AppState): string[] {
+  const vis = s
+    ? new Set(visibleIndices(t, s.searchMode === 'filter' ? s.search : '', s.adv.hidden))
+    : null
+  return t.sel
+    .filter(i => !vis || vis.has(i))
+    .map(i => t.files[i])
+    .filter(Boolean)
+    .map(f => f.abs || joinPath([...t.path, f.name]))
 }
 
 /** Absolute path of the focused entry, or null. */
@@ -220,6 +231,7 @@ interface Actions {
   swapPathSegment(pi: number, ci: number, name: string): Promise<void>
   navSidebar(label: string): void
   navPath(path: string, other?: boolean): void
+  refreshTab(pi: number, tab: PaneTab): Promise<void>
   revealPath(pi: number, raw: string): Promise<void>
   openClipboardPath(): Promise<void>
   initTauri(): Promise<void>
@@ -238,7 +250,8 @@ interface Actions {
   onTransferDone(d: TransferDone): Promise<void>
   deleteSelected(): Promise<void>
   /** Deletes without asking — the tail of deleteSelected / acceptConfirm. */
-  performDelete(paths: string[]): Promise<void>
+  performDelete(paths: string[], permanent?: boolean): Promise<void>
+  deleteSelectedPermanent(): Promise<void>
   closeConfirm(): void
   acceptConfirm(): Promise<void>
   copyPathToClipboard(): Promise<void>
@@ -410,7 +423,7 @@ interface Actions {
   gotoSel(sel: number): void
   navTo(path: string, other?: boolean): void
   // toast
-  showToast(msg: string, undo?: string): void
+  showToast(msg: string, undo?: AppState['undo']): void
   doUndo(): void
   clearToast(): void
 }
@@ -530,6 +543,8 @@ function serializeSession(s: AppState): SessionData {
     v: 2,
     layouts,
     activeLayout: s.activeLayout,
+    colFracs: s.colFracs,
+    rowFracs: s.rowFracs,
     sidebarW: s.sidebarW,
     sidebarHidden: s.sidebarHidden,
     inspectorW: s.inspectorW,
@@ -762,6 +777,18 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     get().showToast('移動: ' + label)
   },
 
+  /** Re-reads `tab`'s folder into pane `pi`, but only if that tab is still the
+   * one on show. Every refresh here happens after an await, and `navigate`
+   * writes into whichever tab is active *now* — so without this check, a tab
+   * switch during a slow delete or copy would load the old folder into the
+   * newly-shown tab. */
+  refreshTab: async (pi, tab) => {
+    const p = get().panes[pi]
+    if (!p) return
+    if (p.tabs[p.active]?.id !== tab.id) return
+    await get().navigate(pi, tab.path, { push: false })
+  },
+
   navPath: (path, other) => {
     const pi = other ? (get().activePane === 0 ? 1 : 0) : get().activePane
     void get().revealPath(pi, path)
@@ -771,7 +798,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
    * file, so pasting `\server\share\ファイル名.xlsx` lands on the file
    * rather than failing. Shared by the address bar, GoTo and クイックオープン. */
   revealPath: async (pi, raw) => {
-    const path = raw.trim().replace(/^"|"$/g, '')
+    // Pasted paths arrive wrapped, quoted or drawn as a tree — see parsePastedPath.
+    const path = parsePastedPath(raw)
     if (!path) return
     const segs = splitPath(path)
     if (!isTauri) { get().showToast('移動: ' + path); return }
@@ -785,7 +813,9 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     }
     await get().navigate(pi, splitPath(dir))
     // resolve_target returned the parent → `path` was a file; select it.
-    if (dir.toLowerCase() !== path.replace(/[\\\/]+$/, '').toLowerCase()) {
+    // Compare with separators normalised: resolve_target always answers with backslashes, but the pasted path may have used '/'.
+    const norm = (v: string) => v.replace(/[\\\/]+/g, '\\').replace(/\\+$/, '').toLowerCase()
+    if (norm(dir) !== norm(path)) {
       get().focusByName(pi, path)
     }
   },
@@ -877,7 +907,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
 
   copyToClip: () => {
     const t = activeTab(get())
-    const paths = selectedAbs(t)
+    const paths = selectedAbs(t, get())
     if (!paths.length) return
     set({ clip: { mode: 'copy', paths } })
     get().showToast(paths.length + ' 件をコピー')
@@ -885,7 +915,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
 
   cutToClip: () => {
     const t = activeTab(get())
-    const paths = selectedAbs(t)
+    const paths = selectedAbs(t, get())
     if (!paths.length) return
     set({ clip: { mode: 'cut', paths } })
     get().showToast(paths.length + ' 件を切り取り')
@@ -905,7 +935,10 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
    * name collisions if there are any, then hands it to the transfer engine. */
   beginTransfer: async (paths, dest, mode, srcPi) => {
     if (!isTauri || !isRealPath(dest)) return
-    if (get().transfer) { get().showToast('別の転送が実行中です'); return }
+    // The conflict dialog counts as "in flight" too: it is answered later and
+    // will start a transfer of its own. Without this, a second paste while the
+    // dialog is up silently replaces the first request.
+    if (get().transfer || get().conflict) { get().showToast('別の転送が実行中です'); return }
     try {
       const plan = await planTransfer(paths, joinPath(dest))
       if (plan.conflicts.length) {
@@ -920,6 +953,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const c = get().conflict
     if (!c) return
     set({ conflict: null })
+    if (get().transfer) { get().showToast('別の転送が実行中です'); return }
     if (!choice) return
     await get().runTransfer(c.paths, c.dest, c.mode, c.srcPi, choice)
   },
@@ -956,7 +990,10 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
 
   /** Fed by the `transfer-done` event. */
   onTransferDone: async (d) => {
-    if (get().transfer?.id !== d.id) return
+    const running = get().transfer
+    if (running?.id !== d.id) return
+    // Read the mode before clearing it — the toast below needs it.
+    const mode = running.mode
     set({ transfer: null })
     const targets = transferTargets
     transferTargets = null
@@ -973,13 +1010,13 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       return
     }
     const skipped = d.skipped ? ` (${d.skipped} 件スキップ)` : ''
-    get().showToast(`${d.ok} 件を${get().transfer?.mode === 'copy' ? 'コピー' : '転送'}しました${skipped}`)
+    get().showToast(`${d.ok} 件を${mode === 'copy' ? 'コピー' : '移動'}しました${skipped}`)
   },
 
   deleteSelected: async () => {
     const s = get()
     const t = activeTab(s)
-    const paths = selectedAbs(t)
+    const paths = selectedAbs(t, get())
     if (!paths.length) return
     if (!isTauri || !isRealPath(t.path)) { get().showToast('削除: ごみ箱へ移動'); return }
     // 設定 > デフォルト動作 > 削除前に確認. The toggle existed from the start but
@@ -1003,13 +1040,35 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     await get().performDelete(paths)
   },
 
-  performDelete: async (paths) => {
+  /** Shift+Del: skips the recycle bin. Always asks, whatever the setting says —
+   * this one genuinely can't be undone. */
+  deleteSelectedPermanent: async () => {
+    const s = get()
+    const t = activeTab(s)
+    const paths = selectedAbs(t, s)
+    if (!paths.length) return
+    if (!isTauri || !isRealPath(t.path)) { get().showToast('完全に削除'); return }
+    const names = paths.map(p => splitPath(p).slice(-1)[0])
+    set({
+      confirm: {
+        kind: 'delete-permanent',
+        paths,
+        title: '完全に削除しますか？',
+        okLabel: '完全に削除',
+        body: [`${names.length} 個の項目はごみ箱に入らず、元に戻せません。`, '',
+               ...names.slice(0, 8),
+               ...(names.length > 8 ? [`… 他 ${names.length - 8} 件`] : [])].join(String.fromCharCode(10)),
+      },
+    })
+  },
+
+  performDelete: async (paths, permanent) => {
     const pi = get().activePane
     const t = activeTab(get())
     try {
-      const n = await deleteEntries(paths, false)
-      await get().navigate(pi, t.path, { push: false })
-      get().showToast(`${n} 件をごみ箱へ移動`)
+      const n = await deleteEntries(paths, !!permanent)
+      await get().refreshTab(pi, t)
+      get().showToast(permanent ? `${n} 件を完全に削除しました` : `${n} 件をごみ箱へ移動`)
     } catch (err) { get().showToast('削除失敗: ' + String(err)) }
   },
 
@@ -1020,11 +1079,12 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (!c) return
     set({ confirm: null })
     if (c.kind === 'delete') await get().performDelete(c.paths)
+    if (c.kind === 'delete-permanent') await get().performDelete(c.paths, true)
   },
 
   copyPathToClipboard: async () => {
     const t = activeTab(get())
-    const paths = selectedAbs(t)
+    const paths = selectedAbs(t, get())
     if (!paths.length) return
     const ok = await copyText(paths.join('\r\n'))
     get().showToast(ok ? 'パスをコピーしました' : 'パスのコピーに失敗')
@@ -1055,7 +1115,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (!isTauri || !isRealPath(t.path)) { get().showToast('新しいフォルダー'); return }
     try {
       const abs = await createFolder(t.path, '新しいフォルダー')
-      await get().navigate(pi, t.path, { push: false })
+      await get().refreshTab(pi, t)
       get().focusByName(pi, abs, true)
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
   },
@@ -1067,7 +1127,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (!isTauri || !isRealPath(t.path)) { get().showToast('新規作成'); return }
     try {
       const abs = await bridgeCreateNewItem(t.path, kind)
-      await get().navigate(pi, t.path, { push: false })
+      await get().refreshTab(pi, t)
       get().focusByName(pi, abs, true)
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
   },
@@ -1076,11 +1136,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const s = get()
     const pi = s.activePane
     const t = activeTab(s)
-    const paths = selectedAbs(t)
+    const paths = selectedAbs(t, get())
     if (paths.length !== 1) { get().showToast('コピーを日付付きで保存'); return }
     try {
       await duplicateAsDatedCopy(paths[0])
-      await get().navigate(pi, t.path, { push: false })
+      await get().refreshTab(pi, t)
       get().showToast('日付付きでコピーしました')
     } catch (err) { get().showToast('コピー失敗: ' + String(err)) }
   },
@@ -1181,7 +1241,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (!isTauri || !isRealPath(t.path)) { get().showToast('ショートカットを作成'); return }
     try {
       await createShortcut(abs)
-      await get().navigate(pi, t.path, { push: false })
+      await get().refreshTab(pi, t)
       get().showToast('ショートカットを作成しました')
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
   },
@@ -1195,7 +1255,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (!isTauri || !isRealPath(t.path)) { get().showToast('ショートカットを作成(テキスト)'); return }
     try {
       await createPathShortcutText(abs)
-      await get().navigate(pi, t.path, { push: false })
+      await get().refreshTab(pi, t)
       get().showToast('テキストショートカットを作成しました')
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
   },
@@ -1211,7 +1271,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     try {
       if (text) await createPathShortcutText(abs, abs)
       else await createShortcut(abs, abs)
-      await get().navigate(pi, t.path, { push: false })
+      await get().refreshTab(pi, t)
       get().showToast(text ? 'テキストショートカットを作成しました' : 'ショートカットを作成しました')
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
   },
@@ -1254,7 +1314,13 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (t?.pinned) { get().showToast('ピン留めされたタブです'); return }
     // Last tab in a pane: close the pane itself instead (if there's another
     // pane to fall back to) rather than refusing outright.
-    if (p.tabs.length <= 1) { if (get().panes.length > 1) get().closePane(pi); return }
+    if (p.tabs.length <= 1) {
+      // Closing the pane takes this tab with it, so record it first — otherwise
+      // it's the one tab Ctrl+Shift+T can't bring back.
+      if (get().panes.length > 1) { if (t) pushClosedTab(t); get().closePane(pi) }
+      else get().showToast('最後のタブは閉じられません')
+      return
+    }
     set(s => {
       const panes = clonePanes(s.panes); const pp = panes[pi]
       pp.tabs.splice(ti, 1)
@@ -1523,7 +1589,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
         })).catch(() => {})
       }))
     }
-    get().showToast(`グループ「${closing.name}」を閉じました`, closing.name)
+    get().showToast(`グループ「${closing.name}」を閉じました`, { label: closing.name, kind: 'group' })
   },
 
   /** Restore the most recently closed layout group, tab-close-style. */
@@ -1608,6 +1674,10 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   registerQuickOpenHotkey: async () => {
     if (!isTauri) return
     const combo = get().quickOpenHotkey
+    // Registering the same combo twice fails, which happens whenever a second
+    // window opens (and on every dev-mode remount). Drop any existing
+    // registration first so this is idempotent rather than noisy.
+    await unregisterGlobalShortcut(combo)
     const ok = await registerGlobalShortcut(combo, () => {
       void focusMainWindow()
       useStore.getState().openQuickOpen()
@@ -1621,11 +1691,20 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (isTauri) await unregisterGlobalShortcut(prev)
     set({ quickOpenHotkey: combo })
     if (!isTauri) return
+    // The new combo is persisted, so a failed registration that isn't rolled
+    // back would leave quick-open dead on every future launch as well.
     const ok = await registerGlobalShortcut(combo, () => {
       void focusMainWindow()
       useStore.getState().openQuickOpen()
     })
-    get().showToast(ok ? `ホットキーを ${combo} に変更しました` : `ホットキー(${combo})の登録に失敗しました(他のアプリが使用中の可能性)`)
+    if (ok) { get().showToast(`ホットキーを ${combo} に変更しました`); return }
+    // Put the previous combo back so quick-open keeps working.
+    set({ quickOpenHotkey: prev })
+    await registerGlobalShortcut(prev, () => {
+      void focusMainWindow()
+      useStore.getState().openQuickOpen()
+    })
+    get().showToast(`ホットキー(${combo})の登録に失敗しました(他のアプリが使用中の可能性)。${prev} に戻しました`)
   },
 
   openQuickOpen: () => set({ quickOpen: { open: true }, ctx: null, modal: null }),
@@ -2104,12 +2183,12 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
         try { await renamePath([...t.path, targets[i].name], afters[i]); ok++ }
         catch { fail++ }
       }
-      await get().navigate(pi, t.path, { push: false })
+      await get().refreshTab(pi, t)
       if (fail) get().showToast(`${ok} 件をリネーム・${fail} 件失敗`)
-      else get().showToast(`${ok} 件のファイル名を変更しました`, ok ? ok + ' 件のリネーム' : undefined)
+      else get().showToast(`${ok} 件のファイル名を変更しました`)
       return
     }
-    get().showToast(targets.length + ' 件のファイル名を変更しました', targets.length + ' 件のリネーム')
+    get().showToast(targets.length + ' 件のファイル名を変更しました')
   },
 
   setOptTab: (t) => set({ optTab: t, capturing: null }),
@@ -2179,9 +2258,9 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   doUndo: () => {
     const u = get().undo
     if (!u) return
-    if (toastTimer) clearTimeout(toastTimer)
-    set({ toast: u + ' を元に戻しました', undo: null })
-    toastTimer = setTimeout(() => set({ toast: null }), 2000)
+    set({ undo: null })
+    // Previously this only rewrote the toast text and restored nothing.
+    if (u.kind === 'group') get().reopenClosedLayoutGroup()
   },
   clearToast: () => set({ toast: null, undo: null }),
 }), {

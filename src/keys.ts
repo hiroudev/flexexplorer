@@ -124,6 +124,7 @@ export const ACTIONS: Record<string, (st: Store) => void> = {
   },
   'edit.bulk': st => st.openModal('rename'),
   'edit.delete': st => void st.deleteSelected(),
+  'edit.deleteperm': st => void st.deleteSelectedPermanent(),
   'edit.copypath': st => void st.copyPathToClipboard(),
   'edit.note': st => st.addNote(),
   'edit.newfolder': st => void st.createNewFolder(),

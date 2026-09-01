@@ -46,17 +46,24 @@ export default function App() {
   // second window — show the requested folder in the "tmp" layout group.
   useEffect(() => {
     let unlisten: (() => void) | undefined
-    void onOpenInTmpPane(path => useStore.getState().openInTmpGroup(path)).then(u => { unlisten = u })
-    return () => unlisten?.()
+    let dead = false
+    void onOpenInTmpPane(path => useStore.getState().openInTmpGroup(path))
+      .then(u => { if (dead) u(); else unlisten = u })
+    return () => { dead = true; unlisten?.() }
   }, [])
 
   // Copy/move runs in a background thread on the Rust side and reports back
   // through these two events (see src-tauri/src/transfer.rs).
   useEffect(() => {
+    // `dead` covers unmounting before the listeners resolve — otherwise the
+    // cleanup runs against an empty array and the subscription outlives it
+    // (which under StrictMode means every event arrives twice).
+    let dead = false
     const un: Array<() => void> = []
-    void onTransferProgress(p => useStore.getState().onTransferTick(p)).then(u => un.push(u))
-    void onTransferDone(d => void useStore.getState().onTransferDone(d)).then(u => un.push(u))
-    return () => un.forEach(u => u())
+    const keep = (u: () => void) => { if (dead) u(); else un.push(u) }
+    void onTransferProgress(p => useStore.getState().onTransferTick(p)).then(keep)
+    void onTransferDone(d => void useStore.getState().onTransferDone(d)).then(keep)
+    return () => { dead = true; un.forEach(u => u()) }
   }, [])
 
   // Track pane container width for responsive columns
