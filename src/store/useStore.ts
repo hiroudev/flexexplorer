@@ -2180,7 +2180,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       let ok = 0, fail = 0
       for (let i = 0; i < targets.length; i++) {
         if (targets[i].name === afters[i]) continue
-        try { await renamePath([...t.path, targets[i].name], afters[i]); ok++ }
+        // A search result lives wherever it was found, not under the folder
+        // being shown — rebuilding the path from `t.path` would rename a
+        // same-named file in the search root instead, or fail outright.
+        const from = targets[i].abs ? splitPath(targets[i].abs!) : [...t.path, targets[i].name]
+        try { await renamePath(from, afters[i]); ok++ }
         catch { fail++ }
       }
       await get().refreshTab(pi, t)

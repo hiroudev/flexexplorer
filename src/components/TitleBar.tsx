@@ -102,7 +102,7 @@ function buildMenus(): { title: string; items: MenuItem[] }[] {
         { type: 'sep' },
         { type: 'item', label: 'コマンドパレット', key: 'Ctrl+Shift+P', run: () => s().openPalette() },
         { type: 'sep' },
-        { type: 'item', label: 'FlexExplorer について', run: () => s().showToast('FlexExplorer v0.1.0') },
+        { type: 'item', label: 'FlexExplorer について', run: () => s().showToast(`FlexExplorer v${__APP_VERSION__}`) },
       ],
     },
   ]

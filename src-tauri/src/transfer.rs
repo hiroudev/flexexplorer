@@ -216,58 +216,104 @@ impl Ctx {
 }
 
 /// Copies one file in chunks, so a large file can still be cancelled part-way
-/// and reports progress as it goes. Overwrites `dst` if it exists.
+/// and reports progress as it goes.
+///
+/// The bytes go to a temporary file beside `dst`, which only replaces `dst`
+/// once the whole copy has landed. Writing into `dst` directly would truncate
+/// it on the first byte, so a cancelled or failed overwrite would destroy the
+/// file it was meant to replace and leave nothing usable behind.
 fn copy_file(ctx: &mut Ctx, src: &Path, dst: &Path) -> std::io::Result<()> {
     let name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
-    let mut r = std::fs::File::open(src)?;
-    let mut w = std::fs::File::create(dst)?;
-    let mut buf = vec![0u8; CHUNK];
-    loop {
-        if ctx.cancelled() {
-            return Ok(());
+    let tmp = temp_beside(dst);
+
+    let result = (|| -> std::io::Result<bool> {
+        let mut r = std::fs::File::open(src)?;
+        let mut w = std::fs::File::create(&tmp)?;
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            if ctx.cancelled() {
+                return Ok(false);
+            }
+            let n = r.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            w.write_all(&buf[..n])?;
+            ctx.bytes_done += n as u64;
+            ctx.tick(&name, false);
         }
-        let n = r.read(&mut buf)?;
-        if n == 0 {
-            break;
+        w.flush()?;
+        Ok(true)
+    })();
+
+    match result {
+        Ok(true) => {
+            // Same directory, so this is a rename rather than a copy, and it
+            // replaces `dst` in one step.
+            std::fs::rename(&tmp, dst)?;
+            ctx.done += 1;
+            ctx.tick(&name, false);
+            Ok(())
         }
-        w.write_all(&buf[..n])?;
-        ctx.bytes_done += n as u64;
-        ctx.tick(&name, false);
+        Ok(false) => {
+            let _ = std::fs::remove_file(&tmp);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
     }
-    ctx.done += 1;
-    ctx.tick(&name, false);
-    Ok(())
+}
+
+/// A scratch path next to `dst` that nothing else is using. Beside it, rather
+/// than in %TEMP%, so the final step is a rename on the same volume.
+fn temp_beside(dst: &Path) -> PathBuf {
+    let dir = dst.parent().unwrap_or_else(|| Path::new("."));
+    let stem = dst.file_name().unwrap_or_default().to_string_lossy().to_string();
+    for i in 0.. {
+        let cand = dir.join(format!(".{stem}.flexpart{i}"));
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    unreachable!()
 }
 
 /// Copies a file or a whole folder, stopping early if cancellation is
 /// requested. Existing files at the destination are overwritten; existing
 /// folders are merged into, which is what "上書き" has to mean for a folder —
 /// deleting the destination folder first would take unrelated files with it.
-fn copy_any(ctx: &mut Ctx, src: &Path, dst: &Path) -> std::io::Result<()> {
+/// Returns how many entries were left behind (reparse points). A move must not
+/// delete its source when this is non-zero: those entries exist only at the
+/// source, so removing it would destroy them.
+fn copy_any(ctx: &mut Ctx, src: &Path, dst: &Path) -> std::io::Result<u64> {
     if ctx.cancelled() {
-        return Ok(());
+        return Ok(0);
     }
     let md = std::fs::symlink_metadata(src)?;
     if is_reparse(&md) {
         // Copying through a junction would pull in whatever it points at.
         ctx.credit(1, 0, &src.file_name().unwrap_or_default().to_string_lossy());
-        return Ok(());
+        return Ok(1);
     }
     if md.is_dir() {
         std::fs::create_dir_all(dst)?;
+        let mut skipped = 0;
         for e in std::fs::read_dir(src)? {
             if ctx.cancelled() {
-                return Ok(());
+                return Ok(skipped);
             }
             let e = e?;
-            copy_any(ctx, &e.path(), &dst.join(e.file_name()))?;
+            skipped += copy_any(ctx, &e.path(), &dst.join(e.file_name()))?;
         }
-        Ok(())
+        Ok(skipped)
     } else {
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        copy_file(ctx, src, dst)
+        copy_file(ctx, src, dst)?;
+        Ok(0)
     }
 }
 
@@ -384,15 +430,20 @@ pub fn start_transfer(
             let desired = dest.join(&name);
 
             // Landing where it already is: nothing to do when moving; when
-            // copying, fall through and make a numbered duplicate.
-            if moving && crate::fs::same_entry(&src, &desired) {
+            // copying, this has to become a numbered duplicate.
+            let onto_itself = crate::fs::same_entry(&src, &desired);
+            if moving && onto_itself {
                 guard.skipped += 1;
                 ctx.credit(files, bytes, &label);
                 continue;
             }
 
-            let collides = desired.exists() && !crate::fs::same_entry(&src, &desired);
-            let overwrite = collides && conflict == "overwrite";
+            // `onto_itself` counts as a collision for a copy. Treating it as
+            // "no collision" would send the copy to the source's own path, and
+            // the first write would truncate the file being copied — Ctrl+C
+            // then Ctrl+V in the same folder would empty it.
+            let collides = onto_itself || desired.exists();
+            let overwrite = collides && !onto_itself && conflict == "overwrite";
             if collides && conflict == "skip" {
                 guard.skipped += 1;
                 ctx.credit(files, bytes, &label);
@@ -421,7 +472,7 @@ pub fn start_transfer(
             let result = if moving {
                 move_one(&mut ctx, &src, &target, overwrite)
             } else {
-                copy_any(&mut ctx, &src, &target)
+                copy_any(&mut ctx, &src, &target).map(|_| ())
             };
 
             match result {
@@ -459,11 +510,19 @@ fn move_one(ctx: &mut Ctx, src: &Path, target: &Path, overwrite: bool) -> std::i
             return Ok(());
         }
     }
-    copy_any(ctx, src, target)?;
+    let skipped = copy_any(ctx, src, target)?;
     // Cancelling mid-copy must not delete the source: half of it is now in two
     // places, and the copy is the half that's incomplete.
     if ctx.cancelled() {
         return Ok(());
+    }
+    if skipped > 0 {
+        // Links and junctions weren't copied, so they exist only here. Deleting
+        // the source now would lose them — leave it and say so.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("リンクを{skipped}件コピーできないため、移動元を残しました"),
+        ));
     }
     remove_any(src)
 }

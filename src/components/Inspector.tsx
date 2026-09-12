@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import { useStore } from '../store/useStore'
 import { iconOf, previewText, fmt } from '../utils/fileUtils'
 import {
@@ -94,7 +95,13 @@ export default function Inspector() {
     else showToast('既定のアプリで開く: ' + m.name)
   }
 
-  const mdHtml = kind === 'markdown' && text ? (marked.parse(text, { async: false }) as string) : ''
+  // The file being previewed is arbitrary content from disk, and `marked`
+  // passes raw HTML straight through — an <img onerror=…> in a .md file would
+  // otherwise run inside the app, which has full filesystem access. Sanitise
+  // before it reaches dangerouslySetInnerHTML.
+  const mdHtml = kind === 'markdown' && text
+    ? DOMPurify.sanitize(marked.parse(text, { async: false }) as string)
+    : ''
 
   return (
     <div style={{ position: 'relative', flex: `0 0 ${inspectorOpen ? inspectorW : 0}px`, width: inspectorOpen ? inspectorW : 0, transition: anim === 'off' ? 'none' : 'flex-basis .2s cubic-bezier(.4,0,.2,1), width .2s cubic-bezier(.4,0,.2,1)', overflow: 'hidden' }}>
