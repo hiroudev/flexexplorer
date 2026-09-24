@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useStore } from '../store/useStore'
 import { noteKey, joinPath } from '../fs/bridge'
 
@@ -79,10 +79,21 @@ export default function ContextMenu() {
   const runTortoiseSvn = useStore(s => s.runTortoiseSvn)
   const runWinMerge = useStore(s => s.runWinMerge)
 
-  if (!ctx) return null
+  // The tab this menu belongs to, if it is still the one on show in that pane.
+  const livePane = ctx ? panes[ctx.pi] : undefined
+  const liveTab = livePane?.tabs[livePane.active]
+  const stale = !!ctx && liveTab?.id !== ctx.tabId
+
+  // Anything that reshuffles panes (a BlueWind relaunch switching to the tmp
+  // group, a pane closing, a tab switch) invalidates the menu. Close it rather
+  // than render against a pane index that now means something else — or,
+  // when the index is past the end, crash reading panes[pi].tabs.
+  useEffect(() => { if (stale) closeCtx() }, [stale, closeCtx])
+
+  if (!ctx || stale || !liveTab) return null
 
   const { x, y, pi, idx, q, sub } = ctx
-  const tab = panes[pi].tabs[panes[pi].active]
+  const tab = liveTab
   const isBg = idx === -1
   const f = tab.files[idx]
   const selCount = tab.sel.length
@@ -206,7 +217,23 @@ export default function ContextMenu() {
 
   return (
     <>
-      <div onMouseDown={closeCtx} onContextMenu={e => { e.preventDefault(); closeCtx() }} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+      <div
+        // Left/middle click outside: just dismiss. A right click is left to the
+        // contextmenu handler, which passes it on to whatever is underneath.
+        onMouseDown={e => { if (e.button !== 2) closeCtx() }}
+        onContextMenu={e => {
+          e.preventDefault()
+          const { clientX, clientY } = e
+          const overlay = e.currentTarget
+          closeCtx()
+          // This overlay covers the whole window, so without passing the event
+          // on, right-clicking another file while a menu is open only closed
+          // the menu and needed a second right click to open the new one.
+          const under = document.elementsFromPoint(clientX, clientY).find(el => el !== overlay)
+          under?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX, clientY, button: 2 }))
+        }}
+        style={{ position: 'fixed', inset: 0, zIndex: 40 }}
+      />
       <div style={{ position: 'fixed', left: px, top: py, zIndex: 41, width: W, padding: 5, background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 10, boxShadow: '0 14px 44px var(--shadow)', fontFamily: 'var(--font)' }}>
         {multi && <div style={{ padding: '7px 12px 6px', fontSize: 11, fontWeight: 700, color: 'var(--accent)' }}>{selCount} 件のファイルを選択中</div>}
 

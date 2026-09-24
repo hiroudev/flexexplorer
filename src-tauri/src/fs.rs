@@ -341,7 +341,35 @@ pub fn read_text_preview(path: String, max_bytes: usize) -> Result<String, Strin
 /// Rename / move a single entry. Returns the new absolute path.
 #[tauri::command]
 pub fn rename_path(from: String, to: String) -> Result<String, String> {
-    std::fs::rename(&from, &to).map_err(|e| e.to_string())?;
+    // std::fs::rename replaces an existing destination on Windows, so renaming
+    // a.txt to b.txt used to silently destroy the old b.txt. Refuse instead.
+    let exists_msg = || {
+        let name = Path::new(&to).file_name().unwrap_or_default().to_string_lossy().to_string();
+        format!("「{name}」は既に存在します")
+    };
+    #[cfg(windows)]
+    {
+        // MoveFileExW without MOVEFILE_REPLACE_EXISTING fails atomically when
+        // the target exists — no window between checking and renaming. A
+        // case-only rename (a.txt → A.txt) is the same file and still succeeds.
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
+        let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let (wf, wt) = (wide(&from), wide(&to));
+        unsafe { MoveFileExW(PCWSTR(wf.as_ptr()), PCWSTR(wt.as_ptr()), MOVE_FILE_FLAGS(0)) }.map_err(|e| {
+            // ERROR_ALREADY_EXISTS (183) / ERROR_FILE_EXISTS (80)
+            let code = (e.code().0 as u32) & 0xFFFF;
+            if code == 183 || code == 80 { exists_msg() } else { e.to_string() }
+        })?;
+    }
+    #[cfg(not(windows))]
+    {
+        let to_p = Path::new(&to);
+        if to_p.exists() && !same_entry(Path::new(&from), to_p) {
+            return Err(exists_msg());
+        }
+        std::fs::rename(&from, &to).map_err(|e| e.to_string())?;
+    }
     Ok(to)
 }
 

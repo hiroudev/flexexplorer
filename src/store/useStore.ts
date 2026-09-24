@@ -189,6 +189,27 @@ function makePaneForPath(path: string): Pane {
 }
 
 /** Absolute paths of the currently selected entries (handles search results). */
+/** A folder listing that arrived after an await, applied only to the tab it
+ * was read for — found by id, and only while that tab still shows the same
+ * folder. Matching by position (pi/ti) let a slow network listing land in a
+ * different tab, or overwrite a tab the user had since navigated elsewhere,
+ * leaving the path bar and the list out of step. */
+function fillListing(panes: Pane[], tabId: string, path: string[], files: FileEntry[]): Pane[] | null {
+  const key = joinPath(path).toLowerCase()
+  for (const p of panes) {
+    const t = p.tabs.find(x => x.id === tabId)
+    if (!t) continue
+    if (joinPath(t.path).toLowerCase() !== key) return null
+    const ps = clonePanes(panes)
+    for (const pp of ps) {
+      const tt = pp.tabs.find(x => x.id === tabId)
+      if (tt) { tt.files = files; tt.sel = files.length ? [0] : [] }
+    }
+    return ps
+  }
+  return null
+}
+
 /** Absolute paths of the selection — restricted to the rows actually on
  * screen. A selection outlives the filter and the hidden-files setting, so
  * without this, selecting everything and then typing a filter would still
@@ -436,7 +457,7 @@ const histFwd: Record<string, string[][]> = {}
 
 // What the transfer in flight should refresh when it finishes. Kept beside the
 // store rather than in it because it's bookkeeping, not view state.
-let transferTargets: { srcPi: number; dirs: Set<string> } | null = null
+let transferTargets: { srcPi: number; dirs: Set<string>; paths: string[] } | null = null
 
 // Pane-grid track weights per layout group id. Kept alongside the store rather
 // than inside LayoutGroup so every place that stashes/restores a group doesn't
@@ -852,56 +873,53 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       if (wsParam) {
         try {
           const json = await loadWorkspace(wsParam)
+          // applyWorkspace restores the saved active pane itself (clamped to
+          // what exists). Forcing 0 afterwards threw that choice away.
           await get().applyWorkspace(JSON.parse(json) as SessionData)
-          set({ activePane: 0 })
+          // A second window shares the process's argv, so the launch folder
+          // below belongs to the first window only — stop here.
           return
         } catch (err) { get().showToast('ワークスペースの読込に失敗: ' + String(err)) }
         // fall through to the usual defaults below if it failed
       }
 
-      // Launched with a folder argument — an external launcher (BlueWind's
-      // "フォルダを開くファイラー" pointed at this exe) or FlexFind's
-      // "FlexExplorerで表示" invoking `FlexExplorer.exe "<path>"`. Show that
-      // folder immediately; this is an explicit navigation request, so it
-      // takes priority over restoring whatever was open last session.
-      const startPath = await launchPath()
-      if (startPath) {
-        const segs = splitPath(startPath)
-        await get().navigate(0, segs, { push: false })
-        const root = drives[0]?.path ? splitPath(drives[0].path) : ['C:']
-        await get().navigate(1, root, { push: false })
-        set({ activePane: 0 })
-        return
-      }
-
-      // A default workspace, if one is pinned (WorkspacesModal's ☆). Beats the
-      // session restore: pinning one says "this is what I start from".
+      // 1. The base layout: the pinned default workspace (WorkspacesModal's
+      //    ★), else the previous session, else two plain panes.
+      let loaded = false
       const def = get().defaultWorkspace
       if (def) {
         try {
           const json = await loadWorkspace(def)
           await get().applyWorkspace(JSON.parse(json) as SessionData)
-          set({ activePane: 0 })
-          return
+          loaded = true
         } catch (err) { get().showToast(`既定のワークスペース「${def}」を読めません: ` + String(err)) }
       }
-
-      // Restore the previous session if enabled.
-      if (get().adv.restore) {
+      if (!loaded && get().adv.restore) {
         try {
           const raw = localStorage.getItem(SESSION_KEY)
           if (raw) {
             await get().applyWorkspace(JSON.parse(raw) as SessionData)
-            set({ activePane: 0 })
-            return
+            loaded = true
           }
         } catch { /* fall through to defaults */ }
       }
-      const homeSegs = splitPath(home)
-      await get().navigate(0, homeSegs.length ? homeSegs : ['C:'], { push: false })
-      const root = drives[0]?.path ? splitPath(drives[0].path) : ['C:']
-      await get().navigate(1, root, { push: false })
-      set({ activePane: 0 })
+      if (!loaded) {
+        const homeSegs = splitPath(home)
+        await get().navigate(0, homeSegs.length ? homeSegs : ['C:'], { push: false })
+        const root = drives[0]?.path ? splitPath(drives[0].path) : ['C:']
+        await get().navigate(1, root, { push: false })
+        set({ activePane: 0 })
+      }
+
+      // 2. Launched with a folder argument — BlueWind's "フォルダを開くファイラー",
+      //    Win+R, FlexFind's "FlexExplorerで表示". Open it in the tmp group *on
+      //    top of* the base layout: the same thing a relaunch does while the app
+      //    is already running (lib.rs → open-in-tmp-pane). Previously a cold
+      //    start replaced the whole layout with a bare two-pane view instead,
+      //    so the default workspace was skipped and first launch behaved
+      //    differently from every launch after it.
+      const startPath = await launchPath()
+      if (startPath) get().openInTmpGroup(startPath)
     } catch (err) { get().showToast('初期化に失敗: ' + String(err)) }
   },
 
@@ -927,8 +945,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (!clip || !clip.paths.length) return
     const t = activeTab(s)
     if (!isTauri || !isRealPath(t.path)) return
+    // A cut is only spent once the move actually completes (onTransferDone).
+    // Dropping it here lost it whenever the conflict dialog was cancelled or
+    // the transfer failed to start — the files were still in place, but the
+    // user had to cut them again.
     await get().beginTransfer(clip.paths, t.path, clip.mode === 'copy' ? 'copy' : 'move', s.activePane)
-    if (clip.mode === 'cut') set({ clip: null })
   },
 
   /** Entry point for every copy/move: works out what it involves, asks about
@@ -964,6 +985,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     // this is a move (a copy leaves them untouched).
     transferTargets = {
       srcPi,
+      paths,
       dirs: new Set([
         joinPath(dest).toLowerCase(),
         ...(mode === 'move' ? paths.map(p => joinPath(splitPath(p).slice(0, -1)).toLowerCase()) : []),
@@ -1005,6 +1027,14 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       await get().navigate(i, pt.path, { push: false })
     }
     if (d.cancelled) { get().showToast('転送を中止しました'); return }
+    // A completed move uses up the cut it came from — but only if the
+    // clipboard still holds that same cut (it may have been replaced since).
+    const clip = get().clip
+    if (mode === 'move' && !d.errors.length && clip?.mode === 'cut' && targets
+        && clip.paths.length === targets.paths.length
+        && clip.paths.every((p, i) => p === targets.paths[i])) {
+      set({ clip: null })
+    }
     if (d.errors.length) {
       get().showToast(`${d.ok} 件完了 / ${d.errors.length} 件失敗: ${d.errors[0]}`)
       return
@@ -1515,12 +1545,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     })
     if (isTauri) {
       const cur = get().panes
-      cur.forEach((p, pi) => p.tabs.forEach((t, ti) => {
+      cur.forEach(p => p.tabs.forEach(t => {
         if (!isRealPath(t.path)) return
         listDir(t.path).then(files => set(st => {
-          const ps = clonePanes(st.panes)
-          if (ps[pi]?.tabs[ti]?.id === t.id) { ps[pi].tabs[ti].files = files; ps[pi].tabs[ti].sel = files.length ? [0] : [] }
-          return { panes: ps }
+          const ps = fillListing(st.panes, t.id, t.path, files)
+          return ps ? { panes: ps } : {}
         })).catch(() => {})
       }))
     }
@@ -1580,12 +1609,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     })
     if (wasActive && isTauri) {
       const cur = get().panes
-      cur.forEach((p, pi) => p.tabs.forEach((t, ti) => {
+      cur.forEach(p => p.tabs.forEach(t => {
         if (!isRealPath(t.path)) return
         listDir(t.path).then(files => set(st => {
-          const ps = clonePanes(st.panes)
-          if (ps[pi]?.tabs[ti]?.id === t.id) { ps[pi].tabs[ti].files = files; ps[pi].tabs[ti].sel = files.length ? [0] : [] }
-          return { panes: ps }
+          const ps = fillListing(st.panes, t.id, t.path, files)
+          return ps ? { panes: ps } : {}
         })).catch(() => {})
       }))
     }
@@ -1611,12 +1639,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     })
     if (isTauri) {
       const cur = get().panes
-      cur.forEach((p, pi) => p.tabs.forEach((t, ti) => {
+      cur.forEach(p => p.tabs.forEach(t => {
         if (!isRealPath(t.path)) return
         listDir(t.path).then(files => set(st => {
-          const ps = clonePanes(st.panes)
-          if (ps[pi]?.tabs[ti]?.id === t.id) { ps[pi].tabs[ti].files = files; ps[pi].tabs[ti].sel = files.length ? [0] : [] }
-          return { panes: ps }
+          const ps = fillListing(st.panes, t.id, t.path, files)
+          return ps ? { panes: ps } : {}
         })).catch(() => {})
       }))
     }
@@ -1921,11 +1948,15 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   openCtx: (pi, idx, x, y) => set(s => {
     const panes = clonePanes(s.panes); const t = panes[pi].tabs[panes[pi].active]
     if (!t.sel.includes(idx)) { t.sel = [idx]; t.focus = idx }
-    return { panes, activePane: pi, ctx: { x, y, pi, idx, q: '', sub: null } }
+    return { panes, activePane: pi, ctx: { x, y, pi, tabId: t.id, idx, q: '', sub: null } }
   }),
   // Right-click on empty list space (no target file): idx: -1, current selection left untouched
   // (matches Explorer — right-clicking blank space doesn't clear what's selected).
-  openCtxBg: (pi, x, y) => set({ activePane: pi, ctx: { x, y, pi, idx: -1, q: '', sub: null } }),
+  openCtxBg: (pi, x, y) => set(s => {
+    const p = s.panes[pi]
+    if (!p) return {}
+    return { activePane: pi, ctx: { x, y, pi, tabId: p.tabs[p.active].id, idx: -1, q: '', sub: null } }
+  }),
   closeCtx: () => { if (get().ctx) set({ ctx: null }) },
   ctxSearch: (q) => set(s => s.ctx ? { ctx: { ...s.ctx, q } } : {}),
   togglePin: (id) => {
@@ -1987,14 +2018,13 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
         const cur = get().panes
         for (let pi = 0; pi < cur.length; pi++) {
           for (let ti = 0; ti < cur[pi].tabs.length; ti++) {
-            const path = cur[pi].tabs[ti].path
+            const { id, path } = cur[pi].tabs[ti]
             if (!isRealPath(path)) continue
             try {
               const files = await listDir(path)
               set(st => {
-                const ps = clonePanes(st.panes)
-                if (ps[pi]?.tabs[ti]) { ps[pi].tabs[ti].files = files; ps[pi].tabs[ti].sel = files.length ? [0] : [] }
-                return { panes: ps }
+                const ps = fillListing(st.panes, id, path, files)
+                return ps ? { panes: ps } : {}
               })
             } catch { /* skip unreadable */ }
           }
@@ -2127,6 +2157,10 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   },
 
   removeNote: (key) => {
+    // Cancel an edit still waiting to be saved: if it fired after the delete it
+    // would write the note straight back (notes_set), resurrecting it.
+    const pending = noteSaveTimers.get(key)
+    if (pending) { clearTimeout(pending); noteSaveTimers.delete(key) }
     set(s => { const n = { ...s.notes }; delete n[key]; return { notes: n, ctx: null } })
     void notesDelete(key).catch(() => {})
     get().showToast('付箋メモを削除しました')

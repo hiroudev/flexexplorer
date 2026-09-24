@@ -99,6 +99,10 @@ export interface CtxState {
   x: number
   y: number
   pi: number
+  /** The tab the menu was opened on. `pi` alone is only a position: after a
+   * group switch, a pane closing or a tab change it can point at a different
+   * tab — or at nothing — so the menu checks this and closes itself. */
+  tabId: string
   idx: number
   q: string
   /** Which submenu is currently open, if any ('new' | 'more' | 'svn'). */
