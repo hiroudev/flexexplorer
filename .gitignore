@@ -3,3 +3,4 @@ dist/
 src-tauri/target/
 .parsePastedPath.gen.mjs
 .generations.gen.mjs
+.fileName.gen.mjs

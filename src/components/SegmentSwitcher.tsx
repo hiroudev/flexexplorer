@@ -12,6 +12,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store/useStore'
+import { isComposing } from '../keys'
 import { siblingFolders, type Sibling } from '../fs/bridge'
 
 /** Above this many siblings the list gets a filter box. */
@@ -77,6 +78,7 @@ export default function SegmentSwitcher({ pi, path, ci, anchor, onClose }: {
   }
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if (isComposing(e)) return
     // Every key handled here must also stop propagating: React dispatches from
     // the document root, so anything left to bubble reaches App.tsx's global
     // handler as well — Enter would open whatever is selected in the list

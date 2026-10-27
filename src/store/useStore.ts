@@ -2,9 +2,10 @@ import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { THEMES } from 'flex-design/themes/presets.js'
 import { applyTheme } from 'flex-design/runtime/theme.js'
-import type { AppState, FileEntry, Pane, PaneTab, RenameRule, OptTab, ColumnId, LayoutGroup, FolderNote, GenerationRule } from '../types'
+import type { AppState, FileEntry, Pane, PaneTab, RenameRule, OptTab, ColumnId, LayoutGroup, FolderNote, GenerationRule, TransferReport } from '../types'
 import type { ConflictChoice, TransferProgress, TransferDone } from '../fs/bridge'
 import { fmt, fmtDate, hashStr, uidFor, applyRules, visibleIndices, parsePastedPath } from '../utils/fileUtils'
+import { nameProblem } from '../utils/fileName'
 import {
   isTauri, isRealPath, listDir, listDrives, homeDir, launchPath, openPath, splitPath, joinPath, renamePath,
   planTransfer, startTransfer, cancelTransfer as bridgeCancelTransfer, siblingFolders, resolveTarget,
@@ -13,7 +14,7 @@ import {
   saveWorkspace, listWorkspaces, loadWorkspace, deleteWorkspace,
   noteKey, notesLoad, notesSet, notesDelete,
   externalToolsStatus, tortoiseSvnCommand, winmergeCompare,
-  focusMainWindow, registerGlobalShortcut, unregisterGlobalShortcut, openWorkspaceInNewWindow,
+  focusMainWindow, registerGlobalShortcut, unregisterGlobalShortcut, openWorkspaceInNewWindow, winDestroy,
 } from '../fs/bridge'
 
 const F = (name: string, o: Partial<FileEntry> = {}): FileEntry => ({ name, ...o })
@@ -98,8 +99,10 @@ function rid() { return 'r' + Math.random().toString(36).slice(2, 8) }
 
 function defaultRules(): RenameRule[] {
   return [
-    { id: rid(), type: 'replace', on: true, find: '_v\\d+', repl: '', regex: true },
-    { id: rid(), type: 'seq', on: true, start: '1', digits: '3', sep: '_' },
+    // Off until switched on: the dialog used to open with both already
+    // applied, so pressing 実行 straight away renamed every file.
+    { id: rid(), type: 'replace', on: false, find: '_v\\d+', repl: '', regex: true },
+    { id: rid(), type: 'seq', on: false, start: '1', digits: '3', sep: '_' },
   ]
 }
 
@@ -194,7 +197,8 @@ function makePaneForPath(path: string): Pane {
  * folder. Matching by position (pi/ti) let a slow network listing land in a
  * different tab, or overwrite a tab the user had since navigated elsewhere,
  * leaving the path bar and the list out of step. */
-function fillListing(panes: Pane[], tabId: string, path: string[], files: FileEntry[]): Pane[] | null {
+function fillListing(panes: Pane[], tabId: string, path: string[], files: FileEntry[], req?: number): Pane[] | null {
+  if (req !== undefined && navReq.get(tabId) !== req) return null
   const key = joinPath(path).toLowerCase()
   for (const p of panes) {
     const t = p.tabs.find(x => x.id === tabId)
@@ -210,19 +214,83 @@ function fillListing(panes: Pane[], tabId: string, path: string[], files: FileEn
   return null
 }
 
-/** Absolute paths of the selection — restricted to the rows actually on
- * screen. A selection outlives the filter and the hidden-files setting, so
- * without this, selecting everything and then typing a filter would still
- * delete or copy the rows that scrolled out of sight. */
-function selectedAbs(t: PaneTab, s?: AppState): string[] {
-  const vis = s
-    ? new Set(visibleIndices(t, s.searchMode === 'filter' ? s.search : '', s.adv.hidden))
-    : null
-  return t.sel
-    .filter(i => !vis || vis.has(i))
-    .map(i => t.files[i])
-    .filter(Boolean)
-    .map(f => f.abs || joinPath([...t.path, f.name]))
+type ViewState = Pick<AppState, 'search' | 'searchMode' | 'adv'>
+
+/** The selection, restricted to the rows actually on screen. A selection
+ * outlives the filter and the hidden-files setting, so without this,
+ * selecting everything and then typing a filter would still delete, copy or
+ * drag the rows that scrolled out of sight. Everything that acts on "the
+ * selection" — keys, menus, drag, bulk rename, the status bar — goes through
+ * here. */
+export function visibleSelection(t: PaneTab, s: ViewState): number[] {
+  const vis = new Set(visibleIndices(t, s.searchMode === 'filter' ? s.search : '', s.adv.hidden))
+  return t.sel.filter(i => vis.has(i) && t.files[i])
+}
+
+/** Absolute path of row `i` (search results carry their own). */
+export function absAt(t: PaneTab, i: number): string {
+  const f = t.files[i]
+  return f.abs || joinPath([...t.path, f.name])
+}
+
+/** Absolute paths of the visible selection (see `visibleSelection`). */
+export function selectedAbs(t: PaneTab, s: ViewState): string[] {
+  return visibleSelection(t, s).map(i => absAt(t, i))
+}
+
+/** What the bulk rename would do in `t`: the files it touches, their new
+ * names, and — per row — why that row can't be renamed (null if it can).
+ * The targets are the visible selected files; with one or none selected, all
+ * visible files (`whole`). Shared by the dialog's preview and `applyRename`,
+ * so what is shown is exactly what runs. */
+export function renamePlan(t: PaneTab, s: ViewState, rules: RenameRule[]) {
+  // Only what is selected. Falling back to "every file in the folder" when
+  // one or none was selected made a single slip rename all of them; to do the
+  // whole folder, select it all first (Ctrl+A).
+  const idx = visibleSelection(t, s).filter(i => !t.files[i].folder)
+  const targets = idx.map(i => t.files[i])
+  const afters = applyRules(targets, rules)
+  // Compared as full paths: search results come from different folders, and
+  // two `old.txt` in different folders may both become `new_old.txt`.
+  const key = (abs: string) => abs.toLowerCase()
+  const froms = idx.map(i => absAt(t, i))
+  const tos = froms.map((f, k) => f.slice(0, f.lastIndexOf('\\') + 1) + afters[k])
+  const count = new Map<string, number>()
+  tos.forEach(to => count.set(key(to), (count.get(key(to)) || 0) + 1))
+  // Everything listed, hidden or not: renaming onto any of it fails.
+  const existing = new Set(t.files.map((_, j) => key(absAt(t, j))))
+  const problems = targets.map((f, k) => {
+    if (afters[k] === f.name) return null
+    const bad = nameProblem(afters[k])
+    if (bad) return bad
+    if ((count.get(key(tos[k])) || 0) > 1) return '同じ名前が重複'
+    if (key(tos[k]) !== key(froms[k]) && existing.has(key(tos[k]))) return '既に存在'
+    return null
+  })
+  return { targets, afters, problems }
+}
+
+/** Lower-cased absolute path of the folder holding `abs`. */
+function parentKey(abs: string): string {
+  return joinPath(splitPath(abs).slice(0, -1)).toLowerCase()
+}
+
+/** Re-reads every pane whose shown folder is one of `dirs` (lower-cased
+ * absolute paths), plus pane `alsoPane` if given — after an operation changed
+ * them, wherever they happen to be on show. */
+async function refreshShowing(dirs: Set<string>, alsoPane?: number) {
+  // Decided once, by tab: each refresh awaits, and meanwhile panes can be
+  // switched or rearranged, so a pane index taken from the start of the loop
+  // could point at a different tab by the time its turn comes.
+  const todo = useStore.getState().panes
+    .map((pane, i) => ({ i, t: pane.tabs[pane.active] }))
+    .filter(({ i, t }) => isRealPath(t.path) && (dirs.has(joinPath(t.path).toLowerCase()) || i === alsoPane))
+    .map(({ t }) => t)
+  for (const t of todo) {
+    const at = useStore.getState().panes.findIndex(p => p.tabs[p.active]?.id === t.id)
+    if (at < 0) continue
+    await useStore.getState().navigate(at, t.path, { push: false, tabId: t.id, keepActive: true })
+  }
 }
 
 /** Absolute path of the focused entry, or null. */
@@ -242,7 +310,9 @@ interface Actions {
   openPathOrShortcut(pi: number, segs: string[], abs: string): Promise<void>
   openFolderTab(pi: number, name: string): void
   // real filesystem navigation (Tauri); no-ops on the plain web build
-  navigate(pi: number, segs: string[], opts?: { newTab?: boolean; push?: boolean }): Promise<void>
+  /** `tabId`: the tab to update, when the caller awaited something first.
+   * `keepActive`: a background refresh that mustn't move the active pane. */
+  navigate(pi: number, segs: string[], opts?: { newTab?: boolean; push?: boolean; tabId?: string; keepActive?: boolean }): Promise<void>
   navParent(pi: number): void
   navBack(pi: number): void
   navForward(pi: number): void
@@ -258,9 +328,12 @@ interface Actions {
   initTauri(): Promise<void>
   loadDrives(): Promise<void>
   // file operations (Tauri)
-  copyToClip(): void
-  cutToClip(): void
-  paste(): Promise<void>
+  // `paths`/`abs`/`dir` below, when given, name the target explicitly (the
+  // right-click menu passes what it was opened on); otherwise the visible
+  // selection or the focused row of the active tab is used.
+  copyToClip(paths?: string[]): void
+  cutToClip(paths?: string[]): void
+  paste(dest?: string[]): Promise<void>
   // watchable copy/move
   beginTransfer(paths: string[], dest: string[], mode: 'copy' | 'move', srcPi: number): Promise<void>
   runTransfer(paths: string[], dest: string[], mode: 'copy' | 'move', srcPi: number, conflict: ConflictChoice): Promise<void>
@@ -269,38 +342,47 @@ interface Actions {
   cancelTransfer(): void
   onTransferTick(p: TransferProgress): void
   onTransferDone(d: TransferDone): Promise<void>
-  deleteSelected(): Promise<void>
+  openTransferReport(): void
+  /** Asked by the window's close-requested handler: saves what is still
+   * waiting to be saved, and says no while a transfer is running (the close
+   * guard dialog then asks what to do). */
+  readyToClose(): Promise<boolean>
+  /** The close guard's answer; null keeps the window open. 'discard' is
+   * 「保存せずに閉じる」 from the unsaved-notes question. */
+  answerCloseGuard(choice: 'wait' | 'cancel' | 'discard' | null): void
+  deleteSelected(paths?: string[]): Promise<void>
   /** Deletes without asking — the tail of deleteSelected / acceptConfirm. */
   performDelete(paths: string[], permanent?: boolean): Promise<void>
   deleteSelectedPermanent(): Promise<void>
   closeConfirm(): void
   acceptConfirm(): Promise<void>
-  copyPathToClipboard(): Promise<void>
+  copyPathToClipboard(paths?: string[]): Promise<void>
   createNewFolder(): Promise<void>
-  focusByName(pi: number, abs: string, rename?: boolean): void
+  /** With `tabId`, only if that tab is still the one shown in `pi`. */
+  focusByName(pi: number, abs: string, rename?: boolean, tabId?: string): void
   createNewItem(kind: string): Promise<void>
-  duplicateSelectedAsDatedCopy(): Promise<void>
+  duplicateSelectedAsDatedCopy(abs?: string): Promise<void>
   // bookmarks
   addBookmark(): void
   removeBookmark(path: string): void
   // global search
   runGlobalSearch(): Promise<void>
   // native shell actions
-  shellProperties(): void
-  runAsAdmin(): void
-  shellNew(): void
-  openWith(): void
-  revealInExplorer(): void
-  openInTerminal(): void
-  openInVscode(): void
-  createShortcutForSel(): Promise<void>
-  createPathShortcutTextForSel(): Promise<void>
+  shellProperties(abs?: string): void
+  runAsAdmin(abs?: string): void
+  shellNew(abs?: string): void
+  openWith(abs?: string): void
+  revealInExplorer(abs?: string): void
+  openInTerminal(dir?: string): void
+  openInVscode(target?: string): void
+  createShortcutForSel(abs?: string): Promise<void>
+  createPathShortcutTextForSel(abs?: string): Promise<void>
   /** Background right-click: shortcut to the shown folder, placed inside it. */
   createShortcutForFolder(text: boolean): Promise<void>
   /** Drop `paths` onto `destPath` (a folder), copying or moving them there.
    * `srcPi` is the pane they were dragged from, so it can be refreshed too. */
   dropOnFolder(destPath: string[], paths: string[], mode: 'copy' | 'move', srcPi: number): Promise<void>
-  showOsContextMenuForSel(x: number, y: number): Promise<void>
+  showOsContextMenuForSel(x: number, y: number, abs?: string): Promise<void>
   switchTab(pi: number, ti: number): void
   /** Steps the active tab of `pi` by `dir`, wrapping at both ends (Ctrl+←/→). */
   cycleTab(pi: number, dir: 1 | -1): void
@@ -453,11 +535,22 @@ let toastTimer: ReturnType<typeof setTimeout> | null = null
 let dragState: { type: string; startX: number; sidebarW: number; inspectorW: number; pane0Pct: number; paneW: number; colId?: ColumnId; colW?: number; colPi?: number; axis?: 'col' | 'row'; trackIndex?: number; totalPx?: number; fracs?: number[] } | null = null
 // Per-pane back/forward history of path segments, namespaced by layout group id (used under Tauri).
 const histBack: Record<string, string[][]> = {}
+// Latest listing request per tab id (see `navigate`). Every listing that is
+// written into a tab after an await takes a number here first, so whichever
+// was asked for last wins — never whichever happens to arrive last.
+const navReq = new Map<string, number>()
+function bumpReq(key: string): number {
+  const n = (navReq.get(key) ?? 0) + 1
+  navReq.set(key, n)
+  return n
+}
 const histFwd: Record<string, string[][]> = {}
 
 // What the transfer in flight should refresh when it finishes. Kept beside the
 // store rather than in it because it's bookkeeping, not view state.
-let transferTargets: { srcPi: number; dirs: Set<string>; paths: string[] } | null = null
+let transferTargets: { srcPi: number; dirs: Set<string>; paths: string[]; dest: string } | null = null
+// A transfer is being measured (see beginTransfer).
+let planningTransfer = false
 
 // Pane-grid track weights per layout group id. Kept alongside the store rather
 // than inside LayoutGroup so every place that stashes/restores a group doesn't
@@ -497,15 +590,73 @@ const SESSION_KEY = 'flexexplorer:session'
 // typing in a memo doesn't rewrite notes.json on every keystroke.
 export const NOTE_MIN_H = 64
 export const NOTE_MAX_H = 520
-const noteSaveTimers = new Map<string, ReturnType<typeof setTimeout>>()
+// `timer` is null for a note whose save failed: it stays here, unsaved, so
+// closing the window still knows about it (see flushSaves).
+const noteSaveTimers = new Map<string, { timer: ReturnType<typeof setTimeout> | null; note: FolderNote }>()
+
+/** Said every time: the text is still on screen, so a quiet failure looks
+ * saved until the next launch shows it gone. The next edit retries. */
+function noteSaveFailed(err: unknown) {
+  useStore.getState().showToast('付箋メモを保存できません: ' + String(err))
+}
+
+/** Saves one note. A failure puts it back as pending — unless a newer edit
+ * of the same note is already waiting — and resolves to false. */
+async function saveNote(key: string, note: FolderNote): Promise<boolean> {
+  try {
+    await notesSet(key, note)
+    return true
+  } catch (err) {
+    if (!noteSaveTimers.has(key)) noteSaveTimers.set(key, { timer: null, note })
+    noteSaveFailed(err)
+    return false
+  }
+}
 
 function saveNoteDebounced(key: string, note: FolderNote) {
   const prev = noteSaveTimers.get(key)
-  if (prev) clearTimeout(prev)
-  noteSaveTimers.set(key, setTimeout(() => {
-    noteSaveTimers.delete(key)
-    void notesSet(key, note).catch(() => {})
-  }, 500))
+  if (prev?.timer) clearTimeout(prev.timer)
+  noteSaveTimers.set(key, {
+    note,
+    timer: setTimeout(() => {
+      noteSaveTimers.delete(key)
+      void saveNote(key, note)
+    }, 500),
+  })
+}
+
+/** Set by 「保存せずに閉じる」: from then on closing stops asking about notes. */
+let discardUnsaved = false
+let flushChain: Promise<boolean> = Promise.resolve(true)
+
+/** Writes now whatever the debounces are still holding — closing the window
+ * within half a second of typing in a note used to lose that text. False when
+ * a note still couldn't be saved. Calls queue up behind each other, so a
+ * second close request waits for the first one's saves instead of finding
+ * the queue already emptied and closing ahead of them. */
+function flushSaves(): Promise<boolean> {
+  const run = async () => {
+    if (sessionSaveTimer) { clearTimeout(sessionSaveTimer); sessionSaveTimer = null; saveSession() }
+    if (discardUnsaved) return true
+    const pending = [...noteSaveTimers]
+    noteSaveTimers.clear()
+    let ok = true
+    for (const [key, { timer, note }] of pending) {
+      if (timer) clearTimeout(timer)
+      if (!(await saveNote(key, note))) ok = false
+    }
+    return ok
+  }
+  flushChain = flushChain.then(run, run)
+  return flushChain
+}
+
+/** The end of every close this store decides on: nothing may start from
+ * here on (beginTransfer checks), and unsaved notes still stop it. */
+async function finishClose() {
+  useStore.setState({ closeGuard: 'closing', ctx: null })
+  if (!(await flushSaves())) { useStore.setState({ closeGuard: 'saveFailed' }); return }
+  void winDestroy()
 }
 
 function nowStamp(): string {
@@ -621,6 +772,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   genHighlight: false,
   genRules: [],
   transfer: null,
+  transferReport: null,
+  closeGuard: null,
   conflict: null,
   confirm: null,
 
@@ -639,8 +792,15 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       if (e?.ctrlKey) {
         const set2 = new Set(t.sel); set2.has(idx) ? set2.delete(idx) : set2.add(idx); t.sel = [...set2]; t.focus = idx
       } else if (e?.shiftKey) {
-        const a = Math.min(t.focus, idx), b = Math.max(t.focus, idx)
-        const r: number[] = []; for (let i = a; i <= b; i++) r.push(i); t.sel = r
+        // The range runs in display order (sorted, filtered) from the focus
+        // to the clicked row. Raw `files` indices are name order: with the
+        // list sorted by size, a Shift+click picked files that weren't
+        // between the two rows on screen at all.
+        const order = visibleIndices(t, s.searchMode === 'filter' ? s.search : '', s.adv.hidden)
+        const b = order.indexOf(idx)
+        let a = order.indexOf(t.focus)
+        if (a < 0) a = b
+        t.sel = order.slice(Math.min(a, b), Math.max(a, b) + 1)
       } else { t.sel = [idx]; t.focus = idx }
       return { panes, activePane: pi, ctx: null }
     })
@@ -673,9 +833,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
    * shortcut click would bounce out to the standard Explorer window. */
   openPathOrShortcut: async (pi, segs, abs) => {
     if (abs.toLowerCase().endsWith('.lnk')) {
+      const p = get().panes[pi]
+      const tabId = p?.tabs[p.active].id
       try {
         const r = await resolveShortcut(abs)
-        if (r.isDir) { await get().navigate(pi, splitPath(r.target)); return }
+        if (r.isDir) { await get().navigate(pi, splitPath(r.target), { tabId }); return }
       } catch { /* fall through to default handling below */ }
     }
     openPath(segs).catch(err => get().showToast('開けません: ' + String(err)))
@@ -700,32 +862,61 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
 
   navigate: async (pi, segs, opts) => {
     if (!isTauri || !isRealPath(segs)) return
+    const start = get()
+    const p0 = start.panes[pi]
+    if (!p0 && !opts?.tabId) return
+    // The listing arrives after an await, and by then the user may have
+    // switched tabs, groups or panes, or navigated the same tab again. So the
+    // result is tied to the tab it was asked for (by id) and to the latest
+    // request for that tab. Writing into "whatever is active now" put folders
+    // into the wrong tab, and a slow listing could overwrite a faster, later one.
+    // Callers that awaited something of their own first pass the tab they
+    // started from; by now the pane may be showing a different one.
+    const tabId = opts?.tabId ?? p0.tabs[p0.active].id
+    // A new tab is a request of its own, not a re-navigation of the tab it is
+    // opened from: two "新しいタブで開く" in a row, or F5 on the source tab,
+    // mustn't cancel it.
+    const key = opts?.newTab ? 'new:' + rid() : tabId
+    const req = bumpReq(key)
     let files: FileEntry[]
     try { files = await listDir(segs) }
-    catch (err) { get().showToast('開けません: ' + String(err)); return }
+    catch (err) { if (navReq.get(key) === req) get().showToast('開けません: ' + String(err)); return }
+    if (navReq.get(key) !== req) return
+    const at = get().panes.findIndex(p => p.tabs.some(t => t.id === tabId))
+    // Closed, or in a layout group that is no longer shown: drop it.
+    if (at < 0) return
     // record history unless navigating into a fresh tab or replaying history
     if (opts?.push !== false && !opts?.newTab) {
-      const cur = get().panes[pi].tabs[get().panes[pi].active].path
+      const cur = get().panes[at].tabs.find(t => t.id === tabId)!.path
       if (isRealPath(cur) && cur.join('\\') !== segs.join('\\')) {
-        const key = curLayoutId(get()) + ':' + pi
+        const key = curLayoutId(get()) + ':' + at
         ;(histBack[key] ||= []).push(cur)
         histFwd[key] = []
       }
     }
     set(s => {
-      const panes = clonePanes(s.panes); const p = panes[pi]
+      const panes = clonePanes(s.panes); const p = panes[at]
       const title = segs[segs.length - 1] || segs[0]
       const sel = files.length ? [0] : []
+      // Inline rename belongs to the pane's front tab; only a change to that
+      // tab can invalidate it.
+      const front = !!opts?.newTab || p.tabs[p.active].id === tabId
       if (opts?.newTab) {
         p.tabs.push({ id: 't' + rid(), title, path: segs, files, focus: 0, sel, columns: defCols() })
         p.active = p.tabs.length - 1
       } else {
-        const t = p.tabs[p.active]
+        const t = p.tabs.find(x => x.id === tabId)!
         t.title = title; t.path = segs; t.files = files; t.focus = 0; t.sel = sel
       }
       const abs = joinPath(segs)
       const recentPaths = [abs, ...s.recentPaths.filter(rp => rp !== abs)].slice(0, 12)
-      return { panes, activePane: pi, recentPaths, renaming: null }
+      return {
+        panes, recentPaths,
+        // Follow the result — unless it's a background refresh, or the user
+        // has moved to another pane meanwhile.
+        activePane: !opts?.keepActive && s.activePane === start.activePane ? at : s.activePane,
+        renaming: front && s.renaming?.pi === at ? null : s.renaming,
+      }
     })
   },
 
@@ -746,7 +937,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       const hit = sibs.find(x => x.name === name)
       const depth = hit ? hit.depth : 0
       const target = [...path.slice(0, ci), name, ...tail.slice(0, depth)]
-      await get().navigate(pi, target)
+      await get().navigate(pi, target, { tabId: t.id })
       if (depth < tail.length) {
         get().showToast(`「${tail[depth]}」以下は存在しないため、${target[target.length - 1]} を表示しています`)
       }
@@ -807,7 +998,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const p = get().panes[pi]
     if (!p) return
     if (p.tabs[p.active]?.id !== tab.id) return
-    await get().navigate(pi, tab.path, { push: false })
+    await get().navigate(pi, tab.path, { push: false, tabId: tab.id, keepActive: true })
   },
 
   navPath: (path, other) => {
@@ -824,20 +1015,25 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (!path) return
     const segs = splitPath(path)
     if (!isTauri) { get().showToast('移動: ' + path); return }
+    const p = get().panes[pi]
+    if (!p) return
+    // Fixed before the await below (see navigate's `tabId`).
+    const tabId = p.tabs[p.active].id
     const dir = await resolveTarget(path)
     if (!dir) {
       // Not on disk: fall back to navigating as typed, so the usual
       // "開けません" error comes from one place.
-      if (isRealPath(segs)) await get().navigate(pi, segs)
+      if (isRealPath(segs)) await get().navigate(pi, segs, { tabId })
       else get().showToast('見つかりません: ' + path)
       return
     }
-    await get().navigate(pi, splitPath(dir))
+    await get().navigate(pi, splitPath(dir), { tabId })
     // resolve_target returned the parent → `path` was a file; select it.
     // Compare with separators normalised: resolve_target always answers with backslashes, but the pasted path may have used '/'.
     const norm = (v: string) => v.replace(/[\\\/]+/g, '\\').replace(/\\+$/, '').toLowerCase()
     if (norm(dir) !== norm(path)) {
-      get().focusByName(pi, path)
+      const at = get().panes.findIndex(x => x.tabs[x.active]?.id === tabId)
+      if (at >= 0) get().focusByName(at, path, false, tabId)
     }
   },
 
@@ -923,33 +1119,31 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     } catch (err) { get().showToast('初期化に失敗: ' + String(err)) }
   },
 
-  copyToClip: () => {
-    const t = activeTab(get())
-    const paths = selectedAbs(t, get())
+  copyToClip: (given) => {
+    const paths = given ?? selectedAbs(activeTab(get()), get())
     if (!paths.length) return
     set({ clip: { mode: 'copy', paths } })
     get().showToast(paths.length + ' 件をコピー')
   },
 
-  cutToClip: () => {
-    const t = activeTab(get())
-    const paths = selectedAbs(t, get())
+  cutToClip: (given) => {
+    const paths = given ?? selectedAbs(activeTab(get()), get())
     if (!paths.length) return
     set({ clip: { mode: 'cut', paths } })
     get().showToast(paths.length + ' 件を切り取り')
   },
 
-  paste: async () => {
+  paste: async (dest) => {
     const s = get()
     const clip = s.clip
     if (!clip || !clip.paths.length) return
-    const t = activeTab(s)
-    if (!isTauri || !isRealPath(t.path)) return
+    const to = dest ?? activeTab(s).path
+    if (!isTauri || !isRealPath(to)) return
     // A cut is only spent once the move actually completes (onTransferDone).
     // Dropping it here lost it whenever the conflict dialog was cancelled or
     // the transfer failed to start — the files were still in place, but the
     // user had to cut them again.
-    await get().beginTransfer(clip.paths, t.path, clip.mode === 'copy' ? 'copy' : 'move', s.activePane)
+    await get().beginTransfer(clip.paths, to, clip.mode === 'copy' ? 'copy' : 'move', s.activePane)
   },
 
   /** Entry point for every copy/move: works out what it involves, asks about
@@ -959,7 +1153,12 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     // The conflict dialog counts as "in flight" too: it is answered later and
     // will start a transfer of its own. Without this, a second paste while the
     // dialog is up silently replaces the first request.
-    if (get().transfer || get().conflict) { get().showToast('別の転送が実行中です'); return }
+    // Planning counts as well: two quick pastes of a big folder both got past
+    // this check while their plans were still being measured, and the first
+    // transfer then ran on with no progress bar and no way to cancel it.
+    if (get().closeGuard === 'closing') return
+    if (get().transfer || get().conflict || planningTransfer) { get().showToast('別の転送が実行中です'); return }
+    planningTransfer = true
     try {
       const plan = await planTransfer(paths, joinPath(dest))
       if (plan.conflicts.length) {
@@ -968,6 +1167,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       }
       await get().runTransfer(paths, dest, mode, srcPi, 'keepboth')
     } catch (err) { get().showToast('転送を開始できません: ' + String(err)) }
+    finally { planningTransfer = false }
   },
 
   resolveConflict: async (choice) => {
@@ -986,6 +1186,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     transferTargets = {
       srcPi,
       paths,
+      dest: joinPath(dest),
       dirs: new Set([
         joinPath(dest).toLowerCase(),
         ...(mode === 'move' ? paths.map(p => joinPath(splitPath(p).slice(0, -1)).toLowerCase()) : []),
@@ -1016,17 +1217,31 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (running?.id !== d.id) return
     // Read the mode before clearing it — the toast below needs it.
     const mode = running.mode
-    set({ transfer: null })
     const targets = transferTargets
     transferTargets = null
-    // Refresh every pane that was showing either end of the transfer.
-    for (const [i, pane] of get().panes.entries()) {
-      const pt = pane.tabs[pane.active]
-      if (!isRealPath(pt.path)) continue
-      if (!targets?.dirs.has(joinPath(pt.path).toLowerCase()) && i !== targets?.srcPi) continue
-      await get().navigate(i, pt.path, { push: false })
+    const report: TransferReport = {
+      mode, dest: targets?.dest ?? '', at: nowStamp(), cancelled: d.cancelled,
+      links: d.links, items: d.items, linkPaths: d.linkPaths,
     }
-    if (d.cancelled) { get().showToast('転送を中止しました'); return }
+    const guard = get().closeGuard
+    // Closing was put off until this finished. A failure keeps the window
+    // open instead: closing on it would throw the report away unread.
+    if (guard === 'cancel' || (guard === 'wait' && !d.errors.length && !d.cancelled)) {
+      set({ transfer: null, transferReport: report })
+      await finishClose()
+      return
+    }
+    set({ transfer: null, transferReport: report, closeGuard: guard === 'saveFailed' ? guard : null })
+    // Refresh every pane that was showing either end of the transfer.
+    await refreshShowing(targets?.dirs ?? new Set(), targets?.srcPi)
+    const details = { label: '詳細', kind: 'report' as const }
+    if (d.errors.length) {
+      // Opened rather than toasted: a toast is gone in seconds, and a big
+      // transfer is exactly when nobody is watching the screen.
+      set({ modal: 'transferReport', ctx: null })
+      return
+    }
+    if (d.cancelled) { get().showToast('転送を中止しました', details); return }
     // A completed move uses up the cut it came from — but only if the
     // clipboard still holds that same cut (it may have been replaced since).
     const clip = get().clip
@@ -1035,20 +1250,48 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
         && clip.paths.every((p, i) => p === targets.paths[i])) {
       set({ clip: null })
     }
-    if (d.errors.length) {
-      get().showToast(`${d.ok} 件完了 / ${d.errors.length} 件失敗: ${d.errors[0]}`)
-      return
-    }
     const skipped = d.skipped ? ` (${d.skipped} 件スキップ)` : ''
-    get().showToast(`${d.ok} 件を${mode === 'copy' ? 'コピー' : '移動'}しました${skipped}`)
+    // Said out loud: a copy that quietly leaves things out reads as complete.
+    const links = d.links ? ` ・リンク ${d.links} 件はコピーしていません` : ''
+    get().showToast(`${d.ok} 件を${mode === 'copy' ? 'コピー' : '移動'}しました${skipped}${links}`,
+      d.skipped || d.links ? details : undefined)
   },
 
-  deleteSelected: async () => {
+  openTransferReport: () => {
+    if (!get().transferReport) { get().showToast('この起動中にはまだ転送していません'); return }
+    set({ modal: 'transferReport', ctx: null })
+  },
+
+  readyToClose: async () => {
+    if (get().closeGuard === 'closing') return false // already on its way out
+    const running = get().transfer?.id
+    if (!(await flushSaves())) { set({ closeGuard: 'saveFailed', ctx: null }); return false }
+    // The transfer ended while the notes were being saved. Its own handler
+    // has decided by now — closed the window, or kept it for a failure — and
+    // this request mustn't overrule a report that was just opened.
+    if (running && get().transfer?.id !== running) return false
+    if (!get().transfer) return true
+    if (!get().closeGuard) set({ closeGuard: 'ask', ctx: null })
+    return false
+  },
+
+  answerCloseGuard: (choice) => {
+    if (!choice) { set({ closeGuard: null }); return }
+    if (choice === 'discard') discardUnsaved = true
+    // A transfer still running gets asked about next, or is waited for.
+    if (get().transfer) {
+      set({ closeGuard: choice === 'discard' ? 'ask' : choice })
+      if (choice === 'cancel') get().cancelTransfer()
+      return
+    }
+    void finishClose()
+  },
+
+  deleteSelected: async (given) => {
     const s = get()
-    const t = activeTab(s)
-    const paths = selectedAbs(t, get())
+    const paths = given ?? selectedAbs(activeTab(s), s)
     if (!paths.length) return
-    if (!isTauri || !isRealPath(t.path)) { get().showToast('削除: ごみ箱へ移動'); return }
+    if (!isTauri || !isRealPath(splitPath(paths[0]))) { get().showToast('削除: ごみ箱へ移動'); return }
     // 設定 > デフォルト動作 > 削除前に確認. The toggle existed from the start but
     // was never wired to anything, so Del went straight to the recycle bin.
     if (s.adv.confirmDelete) {
@@ -1093,13 +1336,14 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   },
 
   performDelete: async (paths, permanent) => {
-    const pi = get().activePane
-    const t = activeTab(get())
+    let msg: string
     try {
       const n = await deleteEntries(paths, !!permanent)
-      await get().refreshTab(pi, t)
-      get().showToast(permanent ? `${n} 件を完全に削除しました` : `${n} 件をごみ箱へ移動`)
-    } catch (err) { get().showToast('削除失敗: ' + String(err)) }
+      msg = permanent ? `${n} 件を完全に削除しました` : `${n} 件をごみ箱へ移動`
+    } catch (err) { msg = '削除失敗: ' + String(err) }
+    // Also after a failure: the entries before the one that failed are gone.
+    await refreshShowing(new Set(paths.map(parentKey)))
+    get().showToast(msg)
   },
 
   closeConfirm: () => set({ confirm: null }),
@@ -1112,9 +1356,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (c.kind === 'delete-permanent') await get().performDelete(c.paths, true)
   },
 
-  copyPathToClipboard: async () => {
-    const t = activeTab(get())
-    const paths = selectedAbs(t, get())
+  copyPathToClipboard: async (given) => {
+    const paths = given ?? selectedAbs(activeTab(get()), get())
     if (!paths.length) return
     const ok = await copyText(paths.join('\r\n'))
     get().showToast(ok ? 'パスをコピーしました' : 'パスのコピーに失敗')
@@ -1123,10 +1366,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   /** Selects the entry named by `abs` in pane `pi`, scrolling isn't needed
    * since the list re-renders around the focus. With `rename`, opens the
    * inline editor on it — what Explorer does right after 新規作成. */
-  focusByName: (pi, abs, rename) => {
+  focusByName: (pi, abs, rename, tabId) => {
     const name = splitPath(abs).slice(-1)[0]
     const st = get()
     const p = st.panes[pi]
+    if (!p || (tabId && p.tabs[p.active].id !== tabId)) return
     const idx = p.tabs[p.active].files.findIndex(f => f.name === name)
     if (idx < 0) return
     set(s => {
@@ -1146,7 +1390,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     try {
       const abs = await createFolder(t.path, '新しいフォルダー')
       await get().refreshTab(pi, t)
-      get().focusByName(pi, abs, true)
+      get().focusByName(pi, abs, true, t.id)
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
   },
 
@@ -1158,19 +1402,17 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     try {
       const abs = await bridgeCreateNewItem(t.path, kind)
       await get().refreshTab(pi, t)
-      get().focusByName(pi, abs, true)
+      get().focusByName(pi, abs, true, t.id)
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
   },
 
-  duplicateSelectedAsDatedCopy: async () => {
+  duplicateSelectedAsDatedCopy: async (given) => {
     const s = get()
-    const pi = s.activePane
-    const t = activeTab(s)
-    const paths = selectedAbs(t, get())
-    if (paths.length !== 1) { get().showToast('コピーを日付付きで保存'); return }
+    const paths = given ? [given] : selectedAbs(activeTab(s), s)
+    if (paths.length !== 1 || !isTauri) { get().showToast('コピーを日付付きで保存'); return }
     try {
       await duplicateAsDatedCopy(paths[0])
-      await get().refreshTab(pi, t)
+      await refreshShowing(new Set([parentKey(paths[0])]))
       get().showToast('日付付きでコピーしました')
     } catch (err) { get().showToast('コピー失敗: ' + String(err)) }
   },
@@ -1190,7 +1432,6 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
 
   runGlobalSearch: async () => {
     const s = get()
-    const pi = s.activePane
     const t = activeTab(s)
     const query = s.search.trim()
     if (!query) return
@@ -1199,7 +1440,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     try {
       const files = await searchDir(t.path, query, 500)
       set(st => {
-        const panes = clonePanes(st.panes); const p = panes[pi]
+        // Into the pane the search started from, found by its tab: a group
+        // switch while searching would otherwise put the results elsewhere.
+        const at = st.panes.findIndex(p => p.tabs.some(x => x.id === t.id))
+        if (at < 0) return {}
+        const panes = clonePanes(st.panes); const p = panes[at]
         p.tabs.push({ id: 't' + rid(), title: '🔍 ' + query, path: t.path, files, focus: 0, sel: files.length ? [0] : [], columns: defCols() })
         p.active = p.tabs.length - 1
         return { panes }
@@ -1210,15 +1455,15 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
 
   /** Runs the focused item elevated, via the shell's own "runas" verb — the
    * UAC prompt is Windows', so nothing here handles credentials. */
-  runAsAdmin: () => {
-    const abs = focusedAbs(activeTab(get()))
+  runAsAdmin: (given) => {
+    const abs = given ?? focusedAbs(activeTab(get()))
     if (!abs) return
     if (!isTauri) { get().showToast('管理者として実行'); return }
     shellVerb(abs, 'runas').catch(err => get().showToast('管理者として実行できません: ' + String(err)))
   },
 
-  shellProperties: () => {
-    const abs = focusedAbs(activeTab(get()))
+  shellProperties: (given) => {
+    const abs = given ?? focusedAbs(activeTab(get()))
     if (!abs) return
     if (isTauri) shellVerb(abs, 'properties').catch(err => get().showToast('プロパティを開けません: ' + String(err)))
     else get().showToast('プロパティ')
@@ -1227,65 +1472,59 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   /** Explorer's own "新規" verb on the focused file — Office apps open an
    * unsaved copy seeded from it, leaving the original untouched. Same behaviour
    * FlexFind exposes; no-op for types that don't register the verb. */
-  shellNew: () => {
-    const abs = focusedAbs(activeTab(get()))
+  shellNew: (given) => {
+    const abs = given ?? focusedAbs(activeTab(get()))
     if (!abs) return
     if (isTauri) shellVerb(abs, 'new').catch(() => get().showToast('この種類のファイルは「新規」に対応していません'))
     else get().showToast('新規')
   },
 
-  openWith: () => {
-    const abs = focusedAbs(activeTab(get()))
+  openWith: (given) => {
+    const abs = given ?? focusedAbs(activeTab(get()))
     if (!abs) return
     if (isTauri) shellVerb(abs, 'openas').catch(err => get().showToast('開けません: ' + String(err)))
     else get().showToast('プログラムから開く')
   },
 
-  revealInExplorer: () => {
-    const abs = focusedAbs(activeTab(get()))
+  revealInExplorer: (given) => {
+    const abs = given ?? focusedAbs(activeTab(get()))
     if (!abs) return
     if (isTauri) revealInExplorer(abs).catch(err => get().showToast('表示できません: ' + String(err)))
     else get().showToast('エクスプローラーで表示')
   },
 
-  openInTerminal: () => {
-    const t = activeTab(get())
-    if (isTauri && isRealPath(t.path)) openInTerminal(t.path).catch(err => get().showToast('開けません: ' + String(err)))
+  openInTerminal: (dir) => {
+    const segs = dir ? splitPath(dir) : activeTab(get()).path
+    if (isTauri && isRealPath(segs)) openInTerminal(segs).catch(err => get().showToast('開けません: ' + String(err)))
     else get().showToast('ターミナルで開く')
   },
 
-  openInVscode: () => {
+  openInVscode: (given) => {
     const t = activeTab(get())
     const f = t.files[t.focus]
-    const target = f?.folder ? focusedAbs(t) : joinPath(t.path)
+    const target = given ?? (f?.folder ? focusedAbs(t) : joinPath(t.path))
     if (isTauri && target) openInVscode(target).catch(err => get().showToast('VS Code で開けません: ' + String(err)))
     else get().showToast('VS Code で開く')
   },
 
-  createShortcutForSel: async () => {
-    const s = get()
-    const pi = s.activePane
-    const t = activeTab(s)
-    const abs = focusedAbs(t)
+  createShortcutForSel: async (given) => {
+    const abs = given ?? focusedAbs(activeTab(get()))
     if (!abs) return
-    if (!isTauri || !isRealPath(t.path)) { get().showToast('ショートカットを作成'); return }
+    if (!isTauri || !isRealPath(splitPath(abs))) { get().showToast('ショートカットを作成'); return }
     try {
       await createShortcut(abs)
-      await get().refreshTab(pi, t)
+      await refreshShowing(new Set([parentKey(abs)]))
       get().showToast('ショートカットを作成しました')
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
   },
 
-  createPathShortcutTextForSel: async () => {
-    const s = get()
-    const pi = s.activePane
-    const t = activeTab(s)
-    const abs = focusedAbs(t)
+  createPathShortcutTextForSel: async (given) => {
+    const abs = given ?? focusedAbs(activeTab(get()))
     if (!abs) return
-    if (!isTauri || !isRealPath(t.path)) { get().showToast('ショートカットを作成(テキスト)'); return }
+    if (!isTauri || !isRealPath(splitPath(abs))) { get().showToast('ショートカットを作成(テキスト)'); return }
     try {
       await createPathShortcutText(abs)
-      await get().refreshTab(pi, t)
+      await refreshShowing(new Set([parentKey(abs)]))
       get().showToast('テキストショートカットを作成しました')
     } catch (err) { get().showToast('作成失敗: ' + String(err)) }
   },
@@ -1319,9 +1558,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     await get().beginTransfer(targets, destPath, mode, srcPi)
   },
 
-  showOsContextMenuForSel: async (x, y) => {
-    const t = activeTab(get())
-    const abs = focusedAbs(t)
+  showOsContextMenuForSel: async (x, y, given) => {
+    const abs = given ?? focusedAbs(activeTab(get()))
     if (!abs || !isTauri) { get().showToast('Windows のメニュー'); return }
     try { await showShellContextMenu(abs, x, y) }
     catch (err) { get().showToast('メニューを表示できません: ' + String(err)) }
@@ -1403,14 +1641,13 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       return { panes }
     })
     if (isTauri && isRealPath(restored.path)) {
-      listDir(restored.path).then(files => {
-        set(st => {
-          const panes = clonePanes(st.panes); const p = panes[pi]
-          const idx = p.tabs.findIndex(x => x.id === restored.id)
-          if (idx >= 0) { p.tabs[idx].files = files; p.tabs[idx].sel = files.length ? [0] : [] }
-          return { panes }
-        })
-      }).catch(() => {})
+      // Matched by id *and* path: the restored tab may have been navigated
+      // elsewhere before this listing arrives.
+      const req = bumpReq(restored.id)
+      listDir(restored.path).then(files => set(st => {
+        const ps = fillListing(st.panes, restored.id, restored.path, files, req)
+        return ps ? { panes: ps } : {}
+      })).catch(() => {})
     }
     get().showToast(`「${t.title}」を復元しました`)
   },
@@ -1547,8 +1784,9 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       const cur = get().panes
       cur.forEach(p => p.tabs.forEach(t => {
         if (!isRealPath(t.path)) return
+        const req = bumpReq(t.id)
         listDir(t.path).then(files => set(st => {
-          const ps = fillListing(st.panes, t.id, t.path, files)
+          const ps = fillListing(st.panes, t.id, t.path, files, req)
           return ps ? { panes: ps } : {}
         })).catch(() => {})
       }))
@@ -1611,8 +1849,9 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       const cur = get().panes
       cur.forEach(p => p.tabs.forEach(t => {
         if (!isRealPath(t.path)) return
+        const req = bumpReq(t.id)
         listDir(t.path).then(files => set(st => {
-          const ps = fillListing(st.panes, t.id, t.path, files)
+          const ps = fillListing(st.panes, t.id, t.path, files, req)
           return ps ? { panes: ps } : {}
         })).catch(() => {})
       }))
@@ -1641,8 +1880,9 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       const cur = get().panes
       cur.forEach(p => p.tabs.forEach(t => {
         if (!isRealPath(t.path)) return
+        const req = bumpReq(t.id)
         listDir(t.path).then(files => set(st => {
-          const ps = fillListing(st.panes, t.id, t.path, files)
+          const ps = fillListing(st.panes, t.id, t.path, files, req)
           return ps ? { panes: ps } : {}
         })).catch(() => {})
       }))
@@ -1947,15 +2187,24 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
 
   openCtx: (pi, idx, x, y) => set(s => {
     const panes = clonePanes(s.panes); const t = panes[pi].tabs[panes[pi].active]
-    if (!t.sel.includes(idx)) { t.sel = [idx]; t.focus = idx }
-    return { panes, activePane: pi, ctx: { x, y, pi, tabId: t.id, idx, q: '', sub: null } }
+    if (!t.sel.includes(idx)) t.sel = [idx]
+    // Focus follows the right-clicked row, as in Explorer, so keyboard
+    // actions right after the menu agree with what it was opened on.
+    t.focus = idx
+    const targets = selectedAbs(t, s)
+    return {
+      panes, activePane: pi,
+      ctx: { x, y, pi, tabId: t.id, files: t.files, idx, targets: targets.length ? targets : [absAt(t, idx)], target: absAt(t, idx), q: '', sub: null },
+    }
   }),
   // Right-click on empty list space (no target file): idx: -1, current selection left untouched
   // (matches Explorer — right-clicking blank space doesn't clear what's selected).
   openCtxBg: (pi, x, y) => set(s => {
     const p = s.panes[pi]
     if (!p) return {}
-    return { activePane: pi, ctx: { x, y, pi, tabId: p.tabs[p.active].id, idx: -1, q: '', sub: null } }
+    const t = p.tabs[p.active]
+    const here = joinPath(t.path)
+    return { activePane: pi, ctx: { x, y, pi, tabId: t.id, files: t.files, idx: -1, targets: [here], target: here, q: '', sub: null } }
   }),
   closeCtx: () => { if (get().ctx) set({ ctx: null }) },
   ctxSearch: (q) => set(s => s.ctx ? { ctx: { ...s.ctx, q } } : {}),
@@ -2021,9 +2270,10 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
             const { id, path } = cur[pi].tabs[ti]
             if (!isRealPath(path)) continue
             try {
+              const req = bumpReq(id)
               const files = await listDir(path)
               set(st => {
-                const ps = fillListing(st.panes, id, path, files)
+                const ps = fillListing(st.panes, id, path, files, req)
                 return ps ? { panes: ps } : {}
               })
             } catch { /* skip unreadable */ }
@@ -2095,7 +2345,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const f = t.files[r.idx]
     const next = name.trim()
     if (!f || !next || next === f.name) return
-    if (/[\\/:*?"<>|]/.test(next)) { get().showToast('ファイル名に使えない文字が含まれています'); return }
+    const bad = nameProblem(next)
+    if (bad) { get().showToast(bad); return }
     if (!isTauri || !isRealPath(t.path)) { get().showToast(`名前を変更: ${next}`); return }
     // Search results carry their own absolute path; plain listings live under the tab path.
     const fromSegs = f.abs ? splitPath(f.abs) : [...t.path, f.name]
@@ -2115,7 +2366,9 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
 
   loadNotes: async () => {
     if (!isTauri) return
-    try { set({ notes: await notesLoad() }) } catch { /* notes are optional */ }
+    // Nothing is overwritten after this fails: notes_set re-reads the file and
+    // refuses too, rather than saving a map with only the new note in it.
+    try { set({ notes: await notesLoad() }) } catch (err) { get().showToast('付箋メモを読み込めません: ' + String(err)) }
   },
 
   addNote: (path) => {
@@ -2127,7 +2380,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (cur) { set({ ctx: null }); if (cur.collapsed) get().toggleNoteCollapsed(key); return }
     const note: FolderNote = { text: '', h: 140, collapsed: false, updated: nowStamp() }
     set(st => ({ notes: { ...st.notes, [key]: note }, ctx: null }))
-    void notesSet(key, note).catch(() => {})
+    void notesSet(key, note).catch(noteSaveFailed)
     // Focused by the note panel itself once it mounts (see FolderNotePanel).
   },
 
@@ -2160,9 +2413,9 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     // Cancel an edit still waiting to be saved: if it fired after the delete it
     // would write the note straight back (notes_set), resurrecting it.
     const pending = noteSaveTimers.get(key)
-    if (pending) { clearTimeout(pending); noteSaveTimers.delete(key) }
+    if (pending) { if (pending.timer) clearTimeout(pending.timer); noteSaveTimers.delete(key) }
     set(s => { const n = { ...s.notes }; delete n[key]; return { notes: n, ctx: null } })
-    void notesDelete(key).catch(() => {})
+    void notesDelete(key).catch(noteSaveFailed)
     get().showToast('付箋メモを削除しました')
   },
 
@@ -2206,9 +2459,9 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const s = get()
     const pi = s.activePane
     const t = s.panes[pi].tabs[s.panes[pi].active]
-    let targets = t.sel.map(i => t.files[i]).filter(f => f && !f.folder)
-    if (targets.length <= 1) targets = t.files.filter(f => !f.folder)
-    const afters = applyRules(targets, s.rename.rules)
+    const { targets, afters, problems } = renamePlan(t, s, s.rename.rules)
+    // The dialog disables 実行 in this case; this is the backstop.
+    if (problems.some(Boolean)) { get().showToast('リネームできない名前があります'); return }
     set({ modal: null })
     if (isTauri && isRealPath(t.path)) {
       let ok = 0, fail = 0
@@ -2299,6 +2552,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     set({ undo: null })
     // Previously this only rewrote the toast text and restored nothing.
     if (u.kind === 'group') get().reopenClosedLayoutGroup()
+    if (u.kind === 'report') get().openTransferReport()
   },
   clearToast: () => set({ toast: null, undo: null }),
 }), {
@@ -2346,11 +2600,20 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
 
 // Persist the open layout (folders/panes) to localStorage, debounced, so the
 // previous session can be restored on next launch.
+let sessionSaveFailed = false
+function saveSession() {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify(serializeSession(useStore.getState())))
+    sessionSaveFailed = false
+  } catch (err) {
+    // Once per run of failures: this is tried after every state change.
+    if (!sessionSaveFailed) useStore.getState().showToast('開いているフォルダーの配置を保存できません: ' + String(err))
+    sessionSaveFailed = true
+  }
+}
 useStore.subscribe(() => {
   if (sessionSaveTimer) clearTimeout(sessionSaveTimer)
-  sessionSaveTimer = setTimeout(() => {
-    try { localStorage.setItem(SESSION_KEY, JSON.stringify(serializeSession(useStore.getState()))) } catch { /* ignore */ }
-  }, 700)
+  sessionSaveTimer = setTimeout(() => { sessionSaveTimer = null; saveSession() }, 700)
 })
 
 export { SHORTCUT_GROUPS, fmt, fmtDate, hashStr, uidFor }

@@ -122,8 +122,11 @@ pub fn create_shortcut(target: String, dest_dir: Option<String>) -> Result<Strin
 pub fn reveal_in_explorer(path: String) -> Result<(), String> {
     #[cfg(windows)]
     {
+        // Quoted by hand: explorer splits an unquoted argument at commas, and
+        // Rust only quotes arguments that contain spaces.
+        use std::os::windows::process::CommandExt;
         std::process::Command::new("explorer")
-            .arg(format!("/select,{path}"))
+            .raw_arg(format!("/select,\"{path}\""))
             .spawn()
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -140,9 +143,13 @@ pub fn reveal_in_explorer(path: String) -> Result<(), String> {
 pub fn open_in_terminal(dir: String) -> Result<(), String> {
     #[cfg(windows)]
     {
-        if std::process::Command::new("wt.exe").args(["-d", &dir]).spawn().is_err() {
+        // The folder goes in as the working directory, never as an argument:
+        // wt treats `;` in its arguments as a command separator, and cmd
+        // parses `&` and `%` in whatever it's given.
+        if std::process::Command::new("wt.exe").args(["-d", "."]).current_dir(&dir).spawn().is_err() {
+            // A console program started from a GUI process gets its own window.
             std::process::Command::new("cmd")
-                .args(["/C", "start", "cmd", "/K", "cd", "/D", &dir])
+                .current_dir(&dir)
                 .spawn()
                 .map_err(|e| e.to_string())?;
         }
@@ -176,19 +183,23 @@ pub fn show_shell_context_menu(window: tauri::WebviewWindow, path: String, x: i3
     }
 }
 
-/// Open a path in VS Code (resolves the `code` shim via cmd).
+/// Open a path in VS Code, through the `code.cmd` shim it puts on PATH.
 #[tauri::command]
 pub fn open_in_vscode(path: String) -> Result<(), String> {
     #[cfg(windows)]
     {
-        // Same console-flash issue as open_path: cmd.exe needs CREATE_NO_WINDOW.
+        // `code.cmd` is run by name rather than through `cmd /C code <path>`:
+        // for a .cmd program Rust (≥ 1.77.2) escapes the arguments for cmd
+        // itself, or refuses ones it can't make safe, so `&` or `%` in the
+        // path can't turn into extra commands. CREATE_NO_WINDOW keeps the
+        // batch file's console from flashing up.
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("cmd")
-            .args(["/C", "code", &path])
+        std::process::Command::new("code.cmd")
+            .arg(&path)
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("VS Code（code コマンド）を起動できません: {e}"))?;
         Ok(())
     }
     #[cfg(not(windows))]
@@ -271,7 +282,9 @@ mod win {
         let mut info = SHELLEXECUTEINFOW::default();
         info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
         info.fMask = SEE_MASK_INVOKEIDLIST;
-        info.lpVerb = PCWSTR(wverb.as_ptr());
+        // An empty verb means "the default action" — what a double-click in
+        // Explorer does — which the shell only picks when lpVerb is NULL.
+        info.lpVerb = if verb.is_empty() { PCWSTR::null() } else { PCWSTR(wverb.as_ptr()) };
         info.lpFile = PCWSTR(wpath.as_ptr());
         info.nShow = SW_SHOWNORMAL.0;
         let r = unsafe { ShellExecuteExW(&mut info) };

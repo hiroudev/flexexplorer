@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useStore } from '../store/useStore'
+import { isComposing } from '../keys'
 import type { LayoutGroup } from '../types'
 
 /** Drag payload markers. A group tab accepts two kinds of drop: another group
@@ -37,6 +38,7 @@ function GroupTab({ group, index, active, closable, onSwitch, onClose, onRename,
         value={val}
         onChange={e => setVal(e.target.value)}
         onKeyDown={e => {
+          if (isComposing(e)) return
           if (e.key === 'Enter') commit()
           if (e.key === 'Escape') { setVal(group.name); setEditing(false) }
         }}

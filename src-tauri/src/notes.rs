@@ -48,21 +48,23 @@ fn notes_file() -> Result<PathBuf, String> {
 
 fn read_all() -> Result<NoteMap, String> {
     let f = notes_file()?;
-    match std::fs::read_to_string(&f) {
-        Ok(s) => serde_json::from_str(&s).map_err(|e| e.to_string()),
-        // No file yet (or an unreadable one) simply means "no notes".
-        Err(_) => Ok(NoteMap::new()),
+    // Only a missing file means "no notes". One that is locked or unreadable
+    // used to count as empty too, and the next edit then saved a map holding
+    // just that one note over all the others.
+    match crate::fs::read_saved(&f, valid)? {
+        Some(s) => serde_json::from_str(&s).map_err(|e| e.to_string()),
+        None => Ok(NoteMap::new()),
     }
 }
 
 fn write_all(map: &NoteMap) -> Result<(), String> {
     let f = notes_file()?;
     let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
-    // Write to a sibling temp file first so a crash mid-write can't truncate
-    // notes the user already typed.
-    let tmp = f.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &f).map_err(|e| e.to_string())
+    crate::fs::write_replacing(&f, json.as_bytes(), valid)
+}
+
+fn valid(s: &str) -> bool {
+    serde_json::from_str::<NoteMap>(s).is_ok()
 }
 
 /// Whole note map, loaded once at startup.

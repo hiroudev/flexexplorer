@@ -5,7 +5,7 @@
 // false and callers fall back to the mock data baked into the store. This keeps
 // the web build fully functional with zero Tauri runtime present.
 
-import type { FileEntry, FolderNote } from '../types'
+import type { FileEntry, FolderNote, TransferItem } from '../types'
 
 export const isTauri =
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -332,8 +332,12 @@ export interface TransferDone {
   id: string
   ok: number
   skipped: number
+  /** Symlinks/junctions left out (they are never followed). */
+  links: number
   cancelled: boolean
   errors: string[]
+  items: TransferItem[]
+  linkPaths: string[]
 }
 
 /** What a transfer would involve, without touching anything yet. */
@@ -532,10 +536,28 @@ export async function winToggleMaximize(): Promise<void> {
   await getCurrentWindow().toggleMaximize()
 }
 
+/** Goes through the close-requested event, so `onCloseRequested` can stop it. */
 export async function winClose(): Promise<void> {
   if (!isTauri) return
   const { getCurrentWindow } = await import('@tauri-apps/api/window')
   await getCurrentWindow().close()
+}
+
+/** Closes without asking anyone — for after `onCloseRequested` said wait. */
+export async function winDestroy(): Promise<void> {
+  if (!isTauri) return
+  const { getCurrentWindow } = await import('@tauri-apps/api/window')
+  await getCurrentWindow().destroy()
+}
+
+/** Both the title bar's ✕ (`winClose`) and Alt+F4 / the taskbar land here.
+ * `cb` returning false keeps the window open. */
+export async function onCloseRequested(cb: () => Promise<boolean>): Promise<() => void> {
+  if (!isTauri) return () => {}
+  const { getCurrentWindow } = await import('@tauri-apps/api/window')
+  // A throw here would leave the window impossible to close (the listener's
+  // existence is what stops the native close), so an error lets it go.
+  return getCurrentWindow().onCloseRequested(async e => { if (!(await cb().catch(() => true))) e.preventDefault() })
 }
 
 export async function winStartDragging(): Promise<void> {

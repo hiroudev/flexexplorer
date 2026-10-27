@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
-import { useStore, NOTE_MIN_H, NOTE_MAX_H, navAvailability } from '../store/useStore'
+import { useStore, NOTE_MIN_H, NOTE_MAX_H, navAvailability, absAt } from '../store/useStore'
 import { iconOf, visibleIndices, fmt } from '../utils/fileUtils'
 import { PANE_MIME } from './LayoutTabs'
 import SegmentSwitcher from './SegmentSwitcher'
 import { dragOut } from '../fs/bridge'
+import { isComposing } from '../keys'
 import { latestGenerationIndices } from '../utils/generations'
 import { shellIcon, peekIcon, joinPath, splitPath, noteKey, copyText } from '../fs/bridge'
 import type { Pane, FileEntry, ColumnDef, ColumnId } from '../types'
@@ -121,6 +122,7 @@ function RenameInput({ initial, folder }: { initial: string; folder: boolean }) 
       onMouseDown={e => e.stopPropagation()}
       onKeyDown={e => {
         e.stopPropagation()
+        if (isComposing(e)) return
         if (e.key === 'Enter') { e.preventDefault(); finish(true) }
         if (e.key === 'Escape') { e.preventDefault(); finish(false) }
       }}
@@ -318,6 +320,7 @@ function AddressBarInput({ defaultValue, onSubmit, onDone }: {
         // if focus is ever ambiguous for a tick, a leaked keystroke here
         // must not fall through to app-wide shortcuts / type-ahead).
         e.stopPropagation()
+        if (isComposing(e)) return
         if (e.key === 'Enter') { const v = e.currentTarget.value.trim(); if (v) onSubmit(v); onDone() }
         if (e.key === 'Escape') onDone()
       }}
@@ -571,12 +574,6 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
   )
   const tab = pane.tabs[pane.active]
   const dirAbs = joinPath(tab.path)
-  // Absolute paths of the current selection, handed to each row so a drag can
-  // carry the whole selection rather than just the row that started it.
-  const selAbs = useMemo(
-    () => tab.sel.map(i => tab.files[i]).filter(Boolean).map(f => f.abs || joinPath([...tab.path, f.name])),
-    [tab.sel, tab.files, tab.path],
-  )
   // Newest member of each generation set, when the toolbar toggle is on.
   const latestIdx = useMemo(
     () => (genHighlight ? latestGenerationIndices(tab.files, genRules) : new Set<number>()),
@@ -587,6 +584,13 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
   const gridCols = gridTemplate(cols)
   const q = searchMode === 'filter' ? search.trim().toLowerCase() : ''
   const vis = visibleIndices(tab, q, showHidden)
+  // Absolute paths of the visible selection, handed to each row so a drag can
+  // carry the whole selection rather than just the row that started it. Rows
+  // hidden by the filter or the hidden-files setting stay out, as they do for
+  // every other operation on the selection — dragging one visible row used
+  // to move everything the filter was hiding too.
+  const visSet = new Set(vis)
+  const selAbs = tab.sel.filter(i => visSet.has(i) && tab.files[i]).map(i => absAt(tab, i))
 
   // Keep the focused row visible when focus moves via the keyboard.
   const listRef = useRef<HTMLDivElement>(null)

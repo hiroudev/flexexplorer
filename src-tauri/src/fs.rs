@@ -84,8 +84,19 @@ fn is_hidden(path: &Path, name: &str) -> bool {
 }
 
 /// List the contents of a directory.
+/// Runs `f` on Tauri's blocking pool. Commands that aren't `async` run on the
+/// main thread, so a slow network folder, a deep search or a large workbook
+/// froze the whole window until it finished.
+pub(crate) async fn off_main<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-pub fn list_dir(path: String) -> Result<Vec<DirEntryDto>, String> {
+pub async fn list_dir(path: String) -> Result<Vec<DirEntryDto>, String> {
+    off_main(move || list_dir_blocking(path)).await?
+}
+
+fn list_dir_blocking(path: String) -> Result<Vec<DirEntryDto>, String> {
     let dir = PathBuf::from(&path);
     let read = std::fs::read_dir(&dir).map_err(|e| format!("{path}: {e}"))?;
 
@@ -127,7 +138,12 @@ pub fn list_dir(path: String) -> Result<Vec<DirEntryDto>, String> {
 
 /// Enumerate mounted drives / volumes with capacity info.
 #[tauri::command]
-pub fn list_drives() -> Vec<DriveDto> {
+pub async fn list_drives() -> Result<Vec<DriveDto>, String> {
+    // Querying a disconnected network drive can stall for seconds.
+    off_main(list_drives_blocking).await
+}
+
+fn list_drives_blocking() -> Vec<DriveDto> {
     use sysinfo::Disks;
     let disks = Disks::new_with_refreshed_list();
     let mut out: Vec<DriveDto> = disks
@@ -175,8 +191,8 @@ pub fn resolve_launch_target(raw: &str) -> Option<String> {
 /// `None` if it doesn't exist. Lets the frontend turn a pasted
 /// a pasted UNC path into "open that folder, select that file".
 #[tauri::command]
-pub fn resolve_target(path: String) -> Option<String> {
-    resolve_launch_target(&path)
+pub async fn resolve_target(path: String) -> Result<Option<String>, String> {
+    off_main(move || resolve_launch_target(&path)).await
 }
 
 /// A folder to show on startup instead of the usual session restore, passed
@@ -206,17 +222,11 @@ fn dirs_home() -> Option<String> {
 pub fn open_path(path: String) -> Result<(), String> {
     #[cfg(windows)]
     {
-        // `cmd /C start "" "<path>"` lets the shell resolve the default app.
-        // cmd.exe is a console-subsystem process, so without CREATE_NO_WINDOW
-        // it briefly flashes an empty console window on every open — even
-        // though it exits immediately after launching the real target.
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &path])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        // Straight to the shell's default verb. Going through `cmd /C start`
+        // let cmd parse the path: `&`, `^` and `%` in a file name split it
+        // into further commands (a file called `a&calc` launched calc, and
+        // `Q&A.txt` didn't open at all).
+        crate::shell::shell_verb(path, String::new())?;
     }
     #[cfg(target_os = "macos")]
     {
@@ -256,7 +266,11 @@ pub struct SiblingDto {
 /// over. Probing is a plain `is_dir` walk per sibling, so a few dozen
 /// siblings cost almost nothing.
 #[tauri::command]
-pub fn sibling_folders(parent: String, tail: Vec<String>) -> Result<Vec<SiblingDto>, String> {
+pub async fn sibling_folders(parent: String, tail: Vec<String>) -> Result<Vec<SiblingDto>, String> {
+    off_main(move || sibling_folders_blocking(parent, tail)).await?
+}
+
+fn sibling_folders_blocking(parent: String, tail: Vec<String>) -> Result<Vec<SiblingDto>, String> {
     let dir = PathBuf::from(&parent);
     let read = std::fs::read_dir(&dir).map_err(|e| format!("{parent}: {e}"))?;
 
@@ -289,7 +303,11 @@ pub fn sibling_folders(parent: String, tail: Vec<String>) -> Result<Vec<SiblingD
 
 /// Extract a text preview of a spreadsheet's first sheet (xlsx/xls/ods/csv).
 #[tauri::command]
-pub fn read_xlsx_preview(path: String, max_rows: usize, max_cols: usize) -> Result<String, String> {
+pub async fn read_xlsx_preview(path: String, max_rows: usize, max_cols: usize) -> Result<String, String> {
+    off_main(move || read_xlsx_preview_blocking(path, max_rows, max_cols)).await?
+}
+
+fn read_xlsx_preview_blocking(path: String, max_rows: usize, max_cols: usize) -> Result<String, String> {
     use calamine::{open_workbook_auto, Data, Reader};
     let mut wb = open_workbook_auto(&path).map_err(|e| e.to_string())?;
     let names = wb.sheet_names().to_vec();
@@ -328,7 +346,11 @@ pub fn read_xlsx_preview(path: String, max_rows: usize, max_cols: usize) -> Resu
 
 /// Read the first `max_bytes` bytes of a text file as UTF-8 (lossy) for preview.
 #[tauri::command]
-pub fn read_text_preview(path: String, max_bytes: usize) -> Result<String, String> {
+pub async fn read_text_preview(path: String, max_bytes: usize) -> Result<String, String> {
+    off_main(move || read_text_preview_blocking(path, max_bytes)).await?
+}
+
+fn read_text_preview_blocking(path: String, max_bytes: usize) -> Result<String, String> {
     use std::io::Read;
     let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
     let cap = max_bytes.min(256 * 1024);
@@ -338,38 +360,154 @@ pub fn read_text_preview(path: String, max_bytes: usize) -> Result<String, Strin
     Ok(String::from_utf8_lossy(&buf).to_string())
 }
 
-/// Rename / move a single entry. Returns the new absolute path.
-#[tauri::command]
-pub fn rename_path(from: String, to: String) -> Result<String, String> {
-    // std::fs::rename replaces an existing destination on Windows, so renaming
-    // a.txt to b.txt used to silently destroy the old b.txt. Refuse instead.
-    let exists_msg = || {
-        let name = Path::new(&to).file_name().unwrap_or_default().to_string_lossy().to_string();
-        format!("「{name}」は既に存在します")
+/// `p` as a NUL-terminated UTF-16 string for a Win32 call, switched to the
+/// `\\?\` form when it is too long for the classic 260-character limit.
+/// `std::fs` does this on its own; direct `MoveFileExW` / `CopyFileExW`
+/// calls don't, so without it a deep path could be listed but not renamed.
+#[cfg(windows)]
+pub(crate) fn wide_path(p: &Path) -> Vec<u16> {
+    let s = p.to_string_lossy();
+    // The limit counts UTF-16 units, not bytes (a Japanese name is 3 bytes a
+    // character in UTF-8).
+    let long = if s.encode_utf16().count() < 240 || s.starts_with(r"\\?\") {
+        s.to_string()
+    } else if let Some(rest) = s.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{}", rest.replace('/', r"\"))
+    } else if s.as_bytes().get(1) == Some(&b':') {
+        format!(r"\\?\{}", s.replace('/', r"\"))
+    } else {
+        s.to_string()
     };
+    long.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Moves `from` to `to` on the same volume, failing — atomically, with no
+/// gap between checking and moving — if `to` already exists. (`std::fs::rename`
+/// replaces an existing file on Windows.) A case-only rename (a.txt → A.txt)
+/// is the same entry and still succeeds. Fails across volumes too, which the
+/// transfer engine relies on to fall back to copying.
+pub(crate) fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
-        // MoveFileExW without MOVEFILE_REPLACE_EXISTING fails atomically when
-        // the target exists — no window between checking and renaming. A
-        // case-only rename (a.txt → A.txt) is the same file and still succeeds.
         use windows::core::PCWSTR;
         use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
-        let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
-        let (wf, wt) = (wide(&from), wide(&to));
-        unsafe { MoveFileExW(PCWSTR(wf.as_ptr()), PCWSTR(wt.as_ptr()), MOVE_FILE_FLAGS(0)) }.map_err(|e| {
-            // ERROR_ALREADY_EXISTS (183) / ERROR_FILE_EXISTS (80)
-            let code = (e.code().0 as u32) & 0xFFFF;
-            if code == 183 || code == 80 { exists_msg() } else { e.to_string() }
-        })?;
+        let (wf, wt) = (wide_path(from), wide_path(to));
+        unsafe { MoveFileExW(PCWSTR(wf.as_ptr()), PCWSTR(wt.as_ptr()), MOVE_FILE_FLAGS(0)) }
+            .map_err(|e| std::io::Error::from_raw_os_error((e.code().0 as u32 & 0xFFFF) as i32))
     }
     #[cfg(not(windows))]
     {
-        let to_p = Path::new(&to);
-        if to_p.exists() && !same_entry(Path::new(&from), to_p) {
-            return Err(exists_msg());
+        if to.exists() && !same_entry(from, to) {
+            return Err(std::io::ErrorKind::AlreadyExists.into());
         }
-        std::fs::rename(&from, &to).map_err(|e| e.to_string())?;
+        std::fs::rename(from, to)
     }
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Saves one of the app's own files (notes, workspaces) so that it is never
+/// left half-written: the new content goes to a scratch file beside it, is
+/// flushed to disk, and only then replaces the old file. The version being
+/// replaced is kept as `<name>.bak` for `read_saved` to fall back to — but
+/// only when `valid` accepts it: copying a damaged file over a good backup
+/// would leave nothing to recover from if the rename then failed.
+///
+/// One writer at a time is assumed: the app is single-instance, and these
+/// commands are synchronous, so they run one after another on the main thread.
+pub(crate) fn write_replacing(path: &Path, data: &[u8], valid: impl Fn(&str) -> bool) -> Result<(), String> {
+    use std::io::Write;
+    let keep_old = matches!(read_one(path, &valid)?, Saved::Good(_));
+    let tmp = with_suffix(path, ".tmp");
+    let r = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        drop(f);
+        if keep_old {
+            std::fs::copy(path, with_suffix(path, ".bak"))?;
+        }
+        std::fs::rename(&tmp, path)
+    })();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r.map_err(|e| format!("{} に保存できません: {e}", path.display()))
+}
+
+/// One saved file: usable, there but damaged, or not there at all.
+enum Saved {
+    Good(String),
+    Damaged,
+    Missing,
+}
+
+fn read_one(path: &Path, valid: &impl Fn(&str) -> bool) -> Result<Saved, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(match String::from_utf8(bytes) {
+            // Bad UTF-8 is damage as well: a write cut off mid-character.
+            Ok(s) if valid(&s) => Saved::Good(s),
+            _ => Saved::Damaged,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Saved::Missing),
+        Err(e) => Err(format!("{} を読めません: {e}", path.display())),
+    }
+}
+
+/// Reads a file saved by `write_replacing`; `Ok(None)` only when neither it
+/// nor its backup exists. A damaged file falls back to the backup. Anything
+/// that exists but can't be read or used is an error, never "empty": the
+/// caller would write its next change over everything that was in it.
+pub(crate) fn read_saved(path: &Path, valid: impl Fn(&str) -> bool) -> Result<Option<String>, String> {
+    let main = match read_one(path, &valid)? {
+        Saved::Good(s) => return Ok(Some(s)),
+        other => other,
+    };
+    match (main, read_one(&with_suffix(path, ".bak"), &valid)?) {
+        (_, Saved::Good(s)) => Ok(Some(s)),
+        (Saved::Missing, Saved::Missing) => Ok(None),
+        _ => Err(format!("{} が壊れていて、使えるバックアップもありません", path.display())),
+    }
+}
+
+/// Why `name` can't be a file name on Windows, if it can't.
+fn bad_name(name: &str) -> Option<&'static str> {
+    if name.is_empty() || name == "." || name == ".." {
+        return Some("名前が空です");
+    }
+    if name.chars().any(|c| "\\/:*?\"<>|".contains(c) || (c as u32) < 32) {
+        return Some("ファイル名に使えない文字が含まれています");
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Some("名前の末尾にピリオドや空白は使えません");
+    }
+    None
+}
+
+/// Rename a single entry within its folder. Returns the new absolute path.
+#[tauri::command]
+pub fn rename_path(from: String, to: String) -> Result<String, String> {
+    let (f, t) = (Path::new(&from), Path::new(&to));
+    let name = t.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    // A rename never leaves its folder. A generated name containing `\` or
+    // `..` (a bulk-rename prefix of `..\archive\`, say) would otherwise move
+    // the entry somewhere else entirely.
+    if t.parent() != f.parent() || t.file_name().is_none() {
+        return Err("名前に「\\」や「..」は使えません".into());
+    }
+    if let Some(why) = bad_name(&name) {
+        return Err(why.into());
+    }
+    move_no_replace(f, t).map_err(|e| match e.raw_os_error() {
+        // ERROR_ALREADY_EXISTS (183) / ERROR_FILE_EXISTS (80)
+        Some(183) | Some(80) => format!("「{name}」は既に存在します"),
+        _ if e.kind() == std::io::ErrorKind::AlreadyExists => format!("「{name}」は既に存在します"),
+        _ => e.to_string(),
+    })?;
     Ok(to)
 }
 
@@ -497,7 +635,20 @@ pub fn move_entries(paths: Vec<String>, dest_dir: String) -> Result<u32, String>
 
 /// Delete entries. Sends to the OS recycle bin unless `permanent` is true.
 #[tauri::command]
-pub fn delete_entries(paths: Vec<String>, permanent: bool) -> Result<u32, String> {
+pub async fn delete_entries(paths: Vec<String>, permanent: bool) -> Result<u32, String> {
+    // On a fresh thread of its own, not straight on the shared blocking pool:
+    // `trash` initialises COM (single-threaded apartment) per thread and
+    // panics if that thread was already set up differently — and release
+    // builds abort on panic.
+    off_main(move || {
+        std::thread::spawn(move || delete_entries_blocking(paths, permanent))
+            .join()
+            .unwrap_or_else(|_| Err("削除中に予期しないエラーが発生しました".into()))
+    })
+    .await?
+}
+
+fn delete_entries_blocking(paths: Vec<String>, permanent: bool) -> Result<u32, String> {
     let mut n = 0;
     for p in &paths {
         if permanent {
@@ -566,7 +717,11 @@ pub fn create_new_item(dir: String, kind: String) -> Result<String, String> {
 /// Recursively search `root` for entries whose name contains `query`
 /// (case-insensitive). Capped at `max` hits.
 #[tauri::command]
-pub fn search_dir(root: String, query: String, max: usize) -> Vec<SearchHit> {
+pub async fn search_dir(root: String, query: String, max: usize) -> Result<Vec<SearchHit>, String> {
+    off_main(move || search_dir_blocking(root, query, max)).await
+}
+
+fn search_dir_blocking(root: String, query: String, max: usize) -> Vec<SearchHit> {
     use walkdir::WalkDir;
     let q = query.trim().to_lowercase();
     let mut out = Vec::new();
@@ -609,4 +764,44 @@ pub fn search_dir(root: String, query: String, max: usize) -> Vec<SearchHit> {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_files_fall_back_to_the_backup() {
+        let dir = std::env::temp_dir().join(format!("flx-save-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("notes.json");
+        let ok = |s: &str| s.starts_with('{') && s.ends_with('}');
+
+        assert_eq!(read_saved(&f, ok).unwrap(), None);
+        write_replacing(&f, b"{1}", ok).unwrap();
+        write_replacing(&f, b"{2}", ok).unwrap();
+        assert_eq!(read_saved(&f, ok).unwrap().as_deref(), Some("{2}"));
+        assert_eq!(std::fs::read_to_string(dir.join("notes.json.bak")).unwrap(), "{1}");
+        assert!(!dir.join("notes.json.tmp").exists());
+
+        // Cut short: the previous version comes back instead.
+        std::fs::write(&f, "{2").unwrap();
+        std::fs::write(dir.join("notes.json.bak"), "x").unwrap();
+        assert!(read_saved(&f, ok).is_err());
+        std::fs::write(dir.join("notes.json.bak"), "{1}").unwrap();
+        assert_eq!(read_saved(&f, ok).unwrap().as_deref(), Some("{1}"));
+        // Cut off mid-character is damage too, not a read error.
+        std::fs::write(&f, b"{\xe3\x81").unwrap();
+        assert_eq!(read_saved(&f, ok).unwrap().as_deref(), Some("{1}"));
+        // Saving over a damaged file leaves the good backup alone.
+        write_replacing(&f, b"{3}", ok).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("notes.json.bak")).unwrap(), "{1}");
+        // No main file and a damaged backup is an error, not "no data yet".
+        std::fs::remove_file(&f).unwrap();
+        std::fs::write(dir.join("notes.json.bak"), "x").unwrap();
+        assert!(read_saved(&f, ok).is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

@@ -24,7 +24,13 @@ fn safe_name(name: &str) -> String {
 #[tauri::command]
 pub fn save_workspace(name: String, content: String) -> Result<(), String> {
     let f = ws_dir()?.join(format!("{}.json", safe_name(&name)));
-    std::fs::write(f, content).map_err(|e| e.to_string())
+    // Saving over an existing workspace used to truncate it first, so a full
+    // disk or a crash mid-write lost the layout that was already there.
+    crate::fs::write_replacing(&f, content.as_bytes(), valid)
+}
+
+fn valid(s: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(s).is_ok()
 }
 
 #[tauri::command]
@@ -46,11 +52,15 @@ pub fn list_workspaces() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub fn load_workspace(name: String) -> Result<String, String> {
     let f = ws_dir()?.join(format!("{}.json", safe_name(&name)));
-    std::fs::read_to_string(f).map_err(|e| e.to_string())
+    crate::fs::read_saved(&f, valid)?
+        .ok_or_else(|| format!("ワークスペース「{name}」が見つかりません"))
 }
 
 #[tauri::command]
 pub fn delete_workspace(name: String) -> Result<(), String> {
     let f = ws_dir()?.join(format!("{}.json", safe_name(&name)));
-    std::fs::remove_file(f).map_err(|e| e.to_string())
+    std::fs::remove_file(&f).map_err(|e| e.to_string())?;
+    // Otherwise `load_workspace` would bring a deleted workspace back from it.
+    let _ = std::fs::remove_file(f.with_extension("json.bak"));
+    Ok(())
 }

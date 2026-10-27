@@ -9,6 +9,7 @@
 
 import type { StoreApi } from 'zustand'
 import type { AppState } from './types'
+import { visibleSelection } from './store/useStore'
 
 type Store = AppState & Record<string, any>
 
@@ -24,6 +25,16 @@ export function keyName(key: string): string {
     case 'Escape': return 'Esc'
     default: return key.length === 1 ? key.toUpperCase() : key
   }
+}
+
+/** Whether this keystroke belongs to an IME composition (Japanese input
+ * being converted). Chromium reports the Enter that confirms a conversion as
+ * an ordinary `key === 'Enter'` with `isComposing` set — handlers that didn't
+ * check committed a rename, a path or a name half-way through typing it, and
+ * the Esc that cancels a conversion closed the dialog it was typed into. */
+export function isComposing(e: KeyboardEvent | React.KeyboardEvent): boolean {
+  const ne = 'nativeEvent' in e ? e.nativeEvent : e
+  return ne.isComposing || ne.keyCode === 229
 }
 
 /** True for the modifier keys themselves, which can't stand alone as a combo. */
@@ -80,6 +91,7 @@ export const ACTIONS: Record<string, (st: Store) => void> = {
   'cmd.options': st => st.openModal('options'),
   'cmd.workspaces': st => st.openModal('workspaces'),
   'cmd.guide': st => st.openModal('guide'),
+  'cmd.transferReport': st => st.openTransferReport(),
   'win.new': st => void st.openWorkspaceInNewWindow(st.defaultWorkspace ?? undefined),
   'view.density': st => {
     const i = DENSITIES.indexOf(st.opt.rowHeight)
@@ -119,7 +131,8 @@ export const ACTIONS: Record<string, (st: Store) => void> = {
     // so it goes to the bulk tool instead.
     const ap = st.activePane
     const t = st.panes[ap].tabs[st.panes[ap].active]
-    if (t.sel.length === 1) st.startRename(ap, t.sel[0])
+    const sel = visibleSelection(t, st)
+    if (sel.length === 1) st.startRename(ap, sel[0])
     else st.openModal('rename')
   },
   'edit.bulk': st => st.openModal('rename'),

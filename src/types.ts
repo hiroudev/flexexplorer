@@ -103,7 +103,17 @@ export interface CtxState {
    * group switch, a pane closing or a tab change it can point at a different
    * tab — or at nothing — so the menu checks this and closes itself. */
   tabId: string
+  /** That tab's listing when the menu opened. A refresh replaces it, and the
+   * menu closes rather than act on an `idx` that now names another file. */
+  files: FileEntry[]
   idx: number
+  /** What the menu acts on, fixed when it opened: the visible selection (or
+   * the folder itself, on blank space) and the row that was right-clicked.
+   * Reading the selection or focus again at click time aimed "管理者として実行"
+   * and friends at whatever had focus — or, after a pane switch, at another
+   * pane's selection. */
+  targets: string[]
+  target: string
   q: string
   /** Which submenu is currently open, if any ('new' | 'more' | 'svn'). */
   sub: string | null
@@ -149,7 +159,7 @@ export interface ColumnDef {
   w: number // pixel width (used as flex-basis min for 'name')
 }
 
-export type Modal = 'rename' | 'options' | 'workspaces' | 'guide' | null
+export type Modal = 'rename' | 'options' | 'workspaces' | 'guide' | 'transferReport' | null
 export type OptTab = 'appearance' | 'shortcuts' | 'files' | 'generations' | 'default' | 'win' | 'advanced'
 
 export interface AppState {
@@ -173,7 +183,7 @@ export interface AppState {
   toast: string | null
   /** Offered by the toast's ↩ button. Only actions that can genuinely be
    * undone set this — a label alone would promise something nothing delivers. */
-  undo: { label: string; kind: 'group' } | null
+  undo: { label: string; kind: 'group' | 'report' } | null
   capturing: string | null
   binds: Record<string, string>
   rename: { rules: RenameRule[]; addOpen: boolean }
@@ -216,6 +226,14 @@ export interface AppState {
     bytesTotal: number
     current: string
   } | null
+  /** How the last copy/move ended, kept so it can be read after the toast
+   * is gone (コマンドパレット > 直前の転送結果). */
+  transferReport: TransferReport | null
+  /** Closing the window while a transfer runs: 'ask' shows the question,
+   * 'wait' closes once it finishes, 'cancel' once the cancel has landed.
+   * 'saveFailed' asks about notes that couldn't be saved; 'closing' means
+   * the window is going and nothing new may start. */
+  closeGuard: 'ask' | 'wait' | 'cancel' | 'saveFailed' | 'closing' | null
   /** A pending name collision waiting on the user's answer. */
   conflict: {
     names: string[]
@@ -254,4 +272,23 @@ export interface IconInfo {
   color: string
   soft: string
   label: string
+}
+
+/** What became of one top-level entry of a copy/move (transfer.rs `Item`). */
+export interface TransferItem {
+  name: string
+  result: 'ok' | 'skipped' | 'failed' | 'partial' | 'notrun'
+  detail: string
+}
+
+export interface TransferReport {
+  mode: 'copy' | 'move'
+  dest: string
+  /** Finish time, "YYYY/MM/DD HH:mm". */
+  at: string
+  cancelled: boolean
+  links: number
+  items: TransferItem[]
+  /** Links left out (at most 200 are listed). */
+  linkPaths: string[]
 }

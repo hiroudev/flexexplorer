@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../../store/useStore'
+import { isComposing } from '../../keys'
 
 export default function WorkspacesModal() {
   const modal = useStore(s => s.modal)
@@ -52,7 +53,7 @@ export default function WorkspacesModal() {
             <input
               value={name}
               onChange={e => { setName(e.target.value); setPendingOverwrite(false) }}
-              onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') { setName(''); setPendingOverwrite(false) } }}
+              onKeyDown={e => { if (isComposing(e)) return; if (e.key === 'Enter') save(); if (e.key === 'Escape') { setName(''); setPendingOverwrite(false) } }}
               onBlur={() => setPendingOverwrite(false)}
               placeholder="現在のレイアウト名を入力…"
               autoFocus

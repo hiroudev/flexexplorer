@@ -1,11 +1,13 @@
 import { useEffect, useRef } from 'react'
 import { useStore } from '../../store/useStore'
+import { ACTIONS, isComposing } from '../../keys'
 
 const ALL_COMMANDS = [
   { id: 'view.inspector', label: 'Inspector を開閉', cat: '表示', key: 'Space' },
   { id: 'cmd.palette', label: 'コマンドパレットを開く', cat: '表示', key: 'Ctrl+Shift+P' },
   { id: 'cmd.options', label: 'オプションを開く', cat: '表示', key: 'Ctrl+,' },
   { id: 'cmd.goto', label: 'GoTo パスへ移動', cat: 'ナビゲーション', key: 'Ctrl+G' },
+  { id: 'cmd.transferReport', label: '直前の転送結果を表示', cat: '表示', key: '' },
   { id: 'view.sidebar', label: 'サイドバーを開閉', cat: '表示', key: 'Ctrl+B' },
   { id: 'view.theme', label: 'テーマを切替', cat: '表示', key: 'Ctrl+Shift+L' },
   { id: 'view.density', label: '表示密度を切替', cat: '表示', key: 'Ctrl+Shift+D' },
@@ -74,6 +76,7 @@ export default function CommandPalette() {
   const sel = Math.min(palette.sel, flat.length - 1)
 
   const handleKey = (e: React.KeyboardEvent) => {
+    if (isComposing(e)) return
     if (e.key === 'Escape') { closePalette(); return }
     if (e.key === 'ArrowDown') { e.preventDefault(); paletteSel(Math.min(sel + 1, flat.length - 1)); scrollToSel(sel + 1) }
     if (e.key === 'ArrowUp') { e.preventDefault(); paletteSel(Math.max(sel - 1, 0)); scrollToSel(sel - 1) }
@@ -87,31 +90,12 @@ export default function CommandPalette() {
 
   const execute = (id: string) => {
     runCommand(id)
-    // Run side-effects based on id
-    const s = useStore.getState()
-    const ap = s.activePane
-    if (id === 'view.inspector') s.toggleInspector()
-    else if (id === 'view.sidebar') s.toggleSidebar()
-    else if (id === 'view.theme') s.toggleTheme()
-    else if (id === 'cmd.goto') s.openGoto()
-    else if (id === 'cmd.options') s.openModal('options')
-    else if (id === 'edit.bulk') s.openModal('rename')
-    else if (id === 'edit.rename') s.openModal('rename')
-    else if (id === 'nav.newtab') s.newTab(ap)
-    else if (id === 'nav.closetab') { const p = s.panes[ap]; s.closeTab(ap, p.active) }
-    else if (id === 'nav.parent') s.navParent(ap)
-    else if (id === 'nav.back') s.navBack(ap)
-    else if (id === 'nav.forward') s.navForward(ap)
-    else if (id === 'nav.up') s.moveSel(-1)
-    else if (id === 'nav.down') s.moveSel(1)
-    else if (id === 'nav.open') { const t = s.panes[ap].tabs[s.panes[ap].active]; s.openFile(ap, t.focus) }
-    else if (id === 'edit.copy') s.copyToClip()
-    else if (id === 'edit.cut') s.cutToClip()
-    else if (id === 'edit.paste') void s.paste()
-    else if (id === 'edit.delete') void s.deleteSelected()
-    else if (id === 'edit.copypath') void s.copyPathToClipboard()
-    else if (id === 'find.filter') { if (s.searchMode !== 'filter') s.toggleSearchMode() }
-    else if (id === 'find.global') { if (s.searchMode !== 'global') s.toggleSearchMode() }
+    // The same table the keyboard uses (keys.ts), so a command does exactly
+    // what its shortcut does. A separate if-chain here had drifted: 名前の変更
+    // opened the bulk rename on the whole folder, and 表示密度/ペインを切替 only
+    // showed a toast.
+    const run = ACTIONS[id]
+    if (run) run(useStore.getState() as Parameters<typeof run>[0])
     else showToast(ALL_COMMANDS.find(c => c.id === id)?.label || id)
   }
 

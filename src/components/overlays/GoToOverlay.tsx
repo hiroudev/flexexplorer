@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useStore } from '../../store/useStore'
+import { isComposing } from '../../keys'
 
 type PathEntry = { path: string; label: string }
 type Group = { title: string; items: PathEntry[] }
@@ -65,6 +66,7 @@ export default function GoToOverlay() {
   const sel = Math.min(goto.sel, Math.max(0, flat.length - 1))
 
   const handleKey = (e: React.KeyboardEvent) => {
+    if (isComposing(e)) return
     if (e.key === 'Escape') { closeGoto(); return }
     if (e.key === 'ArrowDown') { e.preventDefault(); gotoSel(Math.min(sel + 1, flat.length - 1)); scrollTo(sel + 1) }
     if (e.key === 'ArrowUp') { e.preventDefault(); gotoSel(Math.max(sel - 1, 0)); scrollTo(sel - 1) }

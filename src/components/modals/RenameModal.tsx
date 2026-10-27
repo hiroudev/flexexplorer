@@ -1,6 +1,6 @@
 import React, { useRef } from 'react'
-import { useStore } from '../../store/useStore'
-import { iconOf, applyRules, uidFor } from '../../utils/fileUtils'
+import { useStore, renamePlan } from '../../store/useStore'
+import { iconOf, uidFor } from '../../utils/fileUtils'
 import type { RenameRule, FileEntry } from '../../types'
 
 const TYPE_META: Record<string, { label: string; icon: string; color: string; soft: string }> = {
@@ -60,21 +60,20 @@ export default function RenameModal() {
   const applyRename = useStore(s => s.applyRename)
   const activePane = useStore(s => s.activePane)
   const panes = useStore(s => s.panes)
+  const search = useStore(s => s.search)
+  const searchMode = useStore(s => s.searchMode)
+  const adv = useStore(s => s.adv)
 
   const dragRuleRef = useRef<string | null>(null)
 
   if (modal !== 'rename') return null
 
   const tab = panes[activePane].tabs[panes[activePane].active]
-  let targets = tab.sel.map(i => tab.files[i]).filter(f => f && !f.folder)
-  if (targets.length <= 1) targets = tab.files.filter(f => !f.folder)
-
-  const afters = applyRules(targets, rules)
-  const counts: Record<string, number> = {}
-  afters.forEach(a => { counts[a] = (counts[a] || 0) + 1 })
-  let conflictCount = 0
-  Object.values(counts).forEach(n => { if (n > 1) conflictCount += n })
+  // The same plan applyRename runs, so the preview can't disagree with it.
+  const { targets, afters, problems } = renamePlan(tab, { search, searchMode, adv }, rules)
+  const conflictCount = problems.filter(Boolean).length
   const hasConflict = conflictCount > 0
+  const empty = targets.length === 0
 
   return (
     <div data-screen-label="一括リネーム" onMouseDown={closeModal} style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(8,16,30,.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -83,7 +82,7 @@ export default function RenameModal() {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '15px 20px', borderBottom: '1px solid var(--border)' }}>
           <div>
             <div style={{ fontSize: 15, fontWeight: 680 }}>一括リネーム</div>
-            <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 2 }}>対象 {targets.length} 件 · ルールは上から順に適用</div>
+            <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 2 }}>{empty ? 'ファイルが選択されていません。フォルダ内のすべてを対象にするには、閉じて Ctrl+A で全選択してから開いてください' : `選択中の ${targets.length} 件 · ルールは上から順に適用`}</div>
           </div>
           <CloseBtn onClick={closeModal} />
         </div>
@@ -127,12 +126,13 @@ export default function RenameModal() {
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 18px', fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', background: 'var(--bg-sunken)' }}>
             <span>プレビュー（{targets.length} 件）</span>
-            {hasConflict && <span style={{ color: 'var(--warn)', background: 'var(--warn-soft)', padding: '2px 8px', borderRadius: 5, fontWeight: 600 }}>⚠ 競合 {conflictCount} 件</span>}
+            {hasConflict && <span style={{ color: 'var(--warn)', background: 'var(--warn-soft)', padding: '2px 8px', borderRadius: 5, fontWeight: 600 }}>⚠ リネームできない {conflictCount} 件</span>}
           </div>
           <div style={{ flex: 1, overflowY: 'auto', padding: '3px 0' }}>
             {targets.map((f, i) => {
               const after = afters[i]
-              const dup = counts[after] > 1
+              const problem = problems[i]
+              const dup = !!problem
               const ic = iconOf(f)
               const dotB = f.name.lastIndexOf('.'); const baseB = dotB > 0 ? f.name.slice(0, dotB) : f.name; const extB = dotB > 0 ? f.name.slice(dotB) : ''
               const dotA = after.lastIndexOf('.'); const baseA = dotA > 0 ? after.slice(0, dotA) : after; const extA = dotA > 0 ? after.slice(dotA) : ''
@@ -146,7 +146,7 @@ export default function RenameModal() {
                   <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'var(--mono)', fontSize: 11.5 }}>
                     <DiffSpan before={baseB} after={baseA} isAfter={true} /><span style={{ color: 'var(--text-faint)' }}>{extA}</span>
                   </span>
-                  {dup && <span style={{ flex: '0 0 auto', color: 'var(--warn)', fontSize: 10.5, fontWeight: 600 }}>競合</span>}
+                  {problem && <span style={{ flex: '0 0 auto', color: 'var(--warn)', fontSize: 10.5, fontWeight: 600 }}>{problem}</span>}
                 </div>
               )
             })}
@@ -163,9 +163,9 @@ export default function RenameModal() {
             >キャンセル</button>
             <button
               onClick={applyRename}
-              disabled={hasConflict}
-              style={{ height: 32, display: 'flex', alignItems: 'center', padding: '0 18px', borderRadius: 7, cursor: hasConflict ? 'default' : 'default', fontSize: 12.5, fontWeight: 600, color: 'var(--accent-contrast)', background: hasConflict ? 'var(--text-faint)' : 'var(--accent)', border: 'none', pointerEvents: hasConflict ? 'none' : 'auto' }}
-            >{hasConflict ? '競合を解消してください' : `${targets.length} 件をリネーム`}</button>
+              disabled={hasConflict || empty}
+              style={{ height: 32, display: 'flex', alignItems: 'center', padding: '0 18px', borderRadius: 7, fontSize: 12.5, fontWeight: 600, color: 'var(--accent-contrast)', background: hasConflict || empty ? 'var(--text-faint)' : 'var(--accent)', border: 'none', pointerEvents: hasConflict || empty ? 'none' : 'auto' }}
+            >{empty ? '対象がありません' : hasConflict ? 'リネームできない名前を直してください' : `${targets.length} 件をリネーム`}</button>
           </div>
         </div>
       </div>

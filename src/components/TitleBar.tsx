@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, type MouseEvent } from 'react'
 import { useStore } from '../store/useStore'
+import { ACTIONS, isComposing } from '../keys'
 import { isTauri, winMinimize, winToggleMaximize, winClose, winStartDragging } from '../fs/bridge'
 
 function SearchBox() {
@@ -26,7 +27,7 @@ function SearchBox() {
         onChange={e => setSearch(e.target.value)}
         onFocus={() => setFocus(true)}
         onBlur={() => setFocus(false)}
-        onKeyDown={e => { if (e.key === 'Enter' && searchMode === 'global') { e.preventDefault(); runGlobalSearch() } }}
+        onKeyDown={e => { if (!isComposing(e) && e.key === 'Enter' && searchMode === 'global') { e.preventDefault(); runGlobalSearch() } }}
         placeholder={placeholder}
         style={{ flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent', fontFamily: 'var(--font)', fontSize: 11.5, color: 'var(--text)' }}
       />
@@ -65,7 +66,8 @@ function buildMenus(): { title: string; items: MenuItem[] }[] {
         { type: 'item', label: '切り取り', key: 'Ctrl+X', run: () => s().cutToClip() },
         { type: 'item', label: '貼り付け', key: 'Ctrl+V', run: () => void s().paste() },
         { type: 'sep' },
-        { type: 'item', label: '名前の変更', key: 'F2', run: () => s().openModal('rename') },
+        // Same action as F2: inline for one item, the bulk tool for several.
+        { type: 'item', label: '名前の変更', key: 'F2', run: () => ACTIONS['edit.rename'](s() as Parameters<typeof ACTIONS[string]>[0]) },
         { type: 'item', label: '一括リネーム…', key: 'Ctrl+Shift+R', run: () => s().openModal('rename') },
         { type: 'item', label: '削除', key: 'Del', danger: true, run: () => void s().deleteSelected() },
         { type: 'sep' },

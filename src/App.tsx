@@ -15,9 +15,9 @@ import GuideModal from './components/modals/GuideModal'
 import CommandPalette from './components/overlays/CommandPalette'
 import GoToOverlay from './components/overlays/GoToOverlay'
 import QuickOpenOverlay from './components/overlays/QuickOpenOverlay'
-import { ConfirmDialog, ConflictDialog, TransferProgressBar } from './components/overlays/TransferOverlays'
-import { onOpenInTmpPane, onTransferProgress, onTransferDone } from './fs/bridge'
-import { comboOf, runBinding } from './keys'
+import { ConfirmDialog, ConflictDialog, TransferProgressBar, CloseGuardDialog, TransferReportModal } from './components/overlays/TransferOverlays'
+import { onOpenInTmpPane, onTransferProgress, onTransferDone, onCloseRequested } from './fs/bridge'
+import { comboOf, runBinding, isComposing } from './keys'
 
 export default function App() {
   const dragMove = useStore(s => s.dragMove)
@@ -63,6 +63,9 @@ export default function App() {
     const keep = (u: () => void) => { if (dead) u(); else un.push(u) }
     void onTransferProgress(p => useStore.getState().onTransferTick(p)).then(keep)
     void onTransferDone(d => void useStore.getState().onTransferDone(d)).then(keep)
+    // ✕, Alt+F4 and the taskbar all arrive here: pending saves are written
+    // first, and a running transfer asks before the window goes.
+    void onCloseRequested(() => useStore.getState().readyToClose()).then(keep)
     return () => { dead = true; un.forEach(u => u()) }
   }, [])
 
@@ -85,6 +88,7 @@ export default function App() {
   // list movement, type-ahead, and the Esc/Tab conventions.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (isComposing(e)) return
       const tag = (document.activeElement as HTMLElement)?.tagName
       const inInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
 
@@ -97,6 +101,8 @@ export default function App() {
         useStore.getState().closeConfirm()
         void useStore.getState().resolveConflict(null)
         useStore.getState().closeModal()
+        const guard = useStore.getState().closeGuard
+        if (guard === 'ask' || guard === 'saveFailed') useStore.getState().answerCloseGuard(null)
         return
       }
 
@@ -111,7 +117,12 @@ export default function App() {
 
       // Everything else stays out of the way of modals, overlays and inputs.
       if (modal || paletteOpen || gotoOpen || quickOpenOpen || inInput) return
-      if (useStore.getState().confirm || useStore.getState().conflict) return
+      const guard = useStore.getState().closeGuard
+      if (useStore.getState().confirm || useStore.getState().conflict || guard === 'ask' || guard === 'saveFailed' || guard === 'closing') return
+      // An open context menu acts on what it was opened for. Letting keys
+      // through moved the selection behind it, opened files with Enter, and
+      // Tab switched panes so that the menu's 削除 hit the other pane.
+      if (useStore.getState().ctx) return
 
       // Ctrl+1…9 selects the nth tab of the active pane (fixed, not rebindable —
       // it's a family of ten combos rather than one action).
@@ -197,6 +208,8 @@ export default function App() {
       <ConfirmDialog />
       <ConflictDialog />
       <TransferProgressBar />
+      <CloseGuardDialog />
+      <TransferReportModal />
     </div>
   )
 }

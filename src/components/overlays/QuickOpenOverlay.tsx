@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useStore } from '../../store/useStore'
+import { isComposing } from '../../keys'
 
 /**
  * Popped by the global quick-open hotkey (default Ctrl+Alt+O, see
@@ -40,6 +41,7 @@ export default function QuickOpenOverlay() {
             defaultValue=""
             onKeyDown={e => {
               e.stopPropagation()
+              if (isComposing(e)) return
               if (e.key === 'Enter') { const v = e.currentTarget.value.trim(); if (v) submitQuickOpen(v) }
               if (e.key === 'Escape') closeQuickOpen()
             }}

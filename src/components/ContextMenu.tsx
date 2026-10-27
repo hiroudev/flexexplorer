@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store/useStore'
-import { noteKey, joinPath } from '../fs/bridge'
+import { noteKey, joinPath, splitPath } from '../fs/bridge'
 
 const PIN_DEFS: Record<string, { label: string; dot: string }> = {
   vscode: { label: 'VS Code で開く', dot: '#2E6FD8' },
@@ -47,7 +47,6 @@ export default function ContextMenu() {
   const panes = useStore(s => s.panes)
   const openModal = useStore(s => s.openModal)
   const openFile = useStore(s => s.openFile)
-  const openFolderTab = useStore(s => s.openFolderTab)
   const setInspector = useStore(s => s.toggleInspector)
   const showToast = useStore(s => s.showToast)
   const copyToClip = useStore(s => s.copyToClip)
@@ -78,11 +77,13 @@ export default function ContextMenu() {
   const extTools = useStore(s => s.extTools)
   const runTortoiseSvn = useStore(s => s.runTortoiseSvn)
   const runWinMerge = useStore(s => s.runWinMerge)
+  const navigate = useStore(s => s.navigate)
 
   // The tab this menu belongs to, if it is still the one on show in that pane.
   const livePane = ctx ? panes[ctx.pi] : undefined
   const liveTab = livePane?.tabs[livePane.active]
-  const stale = !!ctx && liveTab?.id !== ctx.tabId
+  // A refresh of the same tab counts too: `idx` would then name another file.
+  const stale = !!ctx && (liveTab?.id !== ctx.tabId || liveTab?.files !== ctx.files)
 
   // Anything that reshuffles panes (a BlueWind relaunch switching to the tmp
   // group, a pane closing, a tab switch) invalidates the menu. Close it rather
@@ -92,11 +93,13 @@ export default function ContextMenu() {
 
   if (!ctx || stale || !liveTab) return null
 
-  const { x, y, pi, idx, q, sub } = ctx
+  const { x, y, pi, idx, q, sub, targets, target } = ctx
   const tab = liveTab
   const isBg = idx === -1
   const f = tab.files[idx]
-  const selCount = tab.sel.length
+  // What the menu acts on, not the raw selection: rows hidden by a filter
+  // don't count, so a lone visible row still gets 名前の変更 and 管理者として実行.
+  const selCount = isBg ? 0 : targets.length
   const multi = selCount > 1
   const W = 232
   const px = Math.min(x, window.innerWidth - W - 8)
@@ -105,11 +108,15 @@ export default function ContextMenu() {
 
   const pinnedItems = pins.map(id => ({ id, ...PIN_DEFS[id] })).filter(p => p.label)
 
+  // The folder the menu is about: the right-clicked folder, else the one shown.
+  const here = joinPath(tab.path)
+  const folderTarget = !isBg && f?.folder ? target : here
+
   const runPin = (id: string, label: string) => {
     closeCtx()
-    if (id === 'copypath') void copyPathToClipboard()
-    else if (id === 'vscode') openInVscode()
-    else if (id === 'terminal') openInTerminal()
+    if (id === 'copypath') void copyPathToClipboard(targets)
+    else if (id === 'vscode') openInVscode(folderTarget)
+    else if (id === 'terminal') openInTerminal(folderTarget)
     else showToast(label)
   }
 
@@ -117,9 +124,6 @@ export default function ContextMenu() {
 
   const hasNote = !!notes[noteKey(tab.path)]
   const openSub = (id: string) => useStore.setState(s => s.ctx ? { ctx: { ...s.ctx!, sub: s.ctx!.sub === id ? null : id } } : {})
-  // Absolute paths this menu operates on — the selection if there is one,
-  // otherwise (background click) the folder itself.
-  const targetAbs = () => (isBg ? [joinPath(tab.path)] : tab.sel.map(i => tab.files[i]).filter(Boolean).map(fl => fl.abs || joinPath([...tab.path, fl.name])))
 
   const items: MenuItem[] = []
   if (isBg) {
@@ -128,8 +132,7 @@ export default function ContextMenu() {
     // native menu, without going through "Windows のメニューを表示…".
     items.push({ icon: '✚', iconColor: 'var(--accent)', label: '新規', key: '', arrow: true, subId: 'new', onClick: () => openSub('new') })
     items.push({ divider: true })
-    items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); if (clip) void paste() } })
-    items.push({ divider: true })
+    items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); if (clip) void paste(tab.path) } })
     items.push({ divider: true })
     items.push({ icon: '☑', iconColor: 'var(--text-muted)', label: 'すべて選択', key: 'Ctrl+A', onClick: () => { closeCtx(); selectAll() } })
     items.push({ icon: '☒', iconColor: 'var(--text-muted)', label: '選択を反転', key: 'Ctrl+Shift+A', onClick: () => { closeCtx(); invertSelection() } })
@@ -152,51 +155,53 @@ export default function ContextMenu() {
     items.push({ icon: '▸', iconColor: 'var(--text-muted)', label: '開く', key: 'Enter', onClick: () => { closeCtx(); openFile(pi, idx) } })
     // Explorer's own "新規" verb, surfaced directly under 開く instead of only
     // through "Windows のメニューを表示…" (Office types open an unsaved copy).
-    if (!multi && f && !f.folder) items.push({ icon: '✚', iconColor: 'var(--accent)', label: '新規', key: '', onClick: () => { closeCtx(); shellNew() } })
-    if (f?.folder) items.push({ icon: '＋', iconColor: 'var(--text-muted)', label: '新しいタブで開く', key: 'Space', onClick: () => { closeCtx(); openFolderTab(pi, f.name) } })
+    if (!multi && f && !f.folder) items.push({ icon: '✚', iconColor: 'var(--accent)', label: '新規', key: '', onClick: () => { closeCtx(); shellNew(target) } })
+    // By absolute path: a search result's folder lives wherever it was found,
+    // not under the folder the search started from.
+    if (f?.folder) items.push({ icon: '＋', iconColor: 'var(--text-muted)', label: '新しいタブで開く', key: '', onClick: () => { closeCtx(); void navigate(pi, splitPath(target), { newTab: true }) } })
     else {
       items.push({ icon: '＋', iconColor: 'var(--text-muted)', label: 'Inspector で表示', key: 'Space', onClick: () => { closeCtx(); setInspector() } })
-      items.push({ icon: '▤', iconColor: 'var(--text-muted)', label: 'プログラムから開く…', key: '', onClick: () => { closeCtx(); openWith() } })
+      items.push({ icon: '▤', iconColor: 'var(--text-muted)', label: 'プログラムから開く…', key: '', onClick: () => { closeCtx(); openWith(target) } })
     }
-    if (f?.folder) items.push({ icon: '▶', iconColor: 'var(--text-muted)', label: 'ターミナルで開く', key: '', onClick: () => { closeCtx(); openInTerminal() } })
+    if (f?.folder) items.push({ icon: '▶', iconColor: 'var(--text-muted)', label: 'ターミナルで開く', key: '', onClick: () => { closeCtx(); openInTerminal(target) } })
     if (!multi && f?.folder) {
-      const childHasNote = !!notes[noteKey([...tab.path, f.name])]
-      items.push({ icon: '📌', iconColor: 'var(--warn)', label: childHasNote ? '付箋メモを編集' : 'このフォルダに付箋メモ', key: '', onClick: () => { closeCtx(); openFolderTab(pi, f.name); addNote([...tab.path, f.name]) } })
+      const childHasNote = !!notes[noteKey(splitPath(target))]
+      items.push({ icon: '📌', iconColor: 'var(--warn)', label: childHasNote ? '付箋メモを編集' : 'このフォルダに付箋メモ', key: '', onClick: () => { closeCtx(); void navigate(pi, splitPath(target)); addNote(splitPath(target)) } })
     }
     items.push({ divider: true })
-    items.push({ icon: '✂', iconColor: 'var(--text-muted)', label: '切り取り', key: 'Ctrl+X', onClick: () => { closeCtx(); cutToClip() } })
-    items.push({ icon: '⎘', iconColor: 'var(--text-muted)', label: 'コピー', key: 'Ctrl+C', onClick: () => { closeCtx(); copyToClip() } })
-    items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); if (clip) void paste() } })
-    items.push({ icon: '⧉', iconColor: 'var(--text-muted)', label: 'パスをコピー', key: 'Ctrl+Shift+C', onClick: () => { closeCtx(); void copyPathToClipboard() } })
+    items.push({ icon: '✂', iconColor: 'var(--text-muted)', label: '切り取り', key: 'Ctrl+X', onClick: () => { closeCtx(); cutToClip(targets) } })
+    items.push({ icon: '⎘', iconColor: 'var(--text-muted)', label: 'コピー', key: 'Ctrl+C', onClick: () => { closeCtx(); copyToClip(targets) } })
+    items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); if (clip) void paste(tab.path) } })
+    items.push({ icon: '⧉', iconColor: 'var(--text-muted)', label: 'パスをコピー', key: 'Ctrl+Shift+C', onClick: () => { closeCtx(); void copyPathToClipboard(targets) } })
     if (!multi && f && !f.folder) {
-      items.push({ icon: '🕓', iconColor: 'var(--text-muted)', label: 'コピーを日付付きで保存', key: '', onClick: () => { closeCtx(); void duplicateSelectedAsDatedCopy() } })
+      items.push({ icon: '🕓', iconColor: 'var(--text-muted)', label: 'コピーを日付付きで保存', key: '', onClick: () => { closeCtx(); void duplicateSelectedAsDatedCopy(target) } })
     }
     items.push({ divider: true })
     // "ショートカットテキストの作成" (パスを書いた.txt) が既定。実体の.lnkが
     // 通用しない対象(クラウド同期フォルダ等)でも確実に使えるため。
     // 一般的な.lnkショートカットが要る場合は下の「ショートカットの作成」で。
-    items.push({ icon: '📝', iconColor: 'var(--text-muted)', label: 'ショートカットテキストの作成', key: '', onClick: () => { closeCtx(); void createPathShortcutTextForSel() } })
-    items.push({ icon: '🔗', iconColor: 'var(--text-muted)', label: 'ショートカットの作成', key: '', onClick: () => { closeCtx(); void createShortcutForSel() } })
+    items.push({ icon: '📝', iconColor: 'var(--text-muted)', label: 'ショートカットテキストの作成', key: '', onClick: () => { closeCtx(); void createPathShortcutTextForSel(target) } })
+    items.push({ icon: '🔗', iconColor: 'var(--text-muted)', label: 'ショートカットの作成', key: '', onClick: () => { closeCtx(); void createShortcutForSel(target) } })
     // Single item → inline edit in the list. A multi-selection already has
     // 一括リネーム at the top of this menu, so it isn't repeated here.
     if (!multi) items.push({ icon: '✎', iconColor: 'var(--text-muted)', label: '名前の変更', key: 'F2', onClick: () => { closeCtx(); startRename(pi, idx) } })
-    items.push({ icon: '🗑', iconColor: 'var(--danger)', label: '削除', key: 'Del', danger: true, onClick: () => { closeCtx(); void deleteSelected() } })
+    items.push({ icon: '🗑', iconColor: 'var(--danger)', label: '削除', key: 'Del', danger: true, onClick: () => { closeCtx(); void deleteSelected(targets) } })
     items.push({ divider: true })
-    items.push({ icon: '◳', iconColor: 'var(--text-muted)', label: 'エクスプローラーで表示', key: '', onClick: () => { closeCtx(); revealInExplorer() } })
+    items.push({ icon: '◳', iconColor: 'var(--text-muted)', label: 'エクスプローラーで表示', key: '', onClick: () => { closeCtx(); revealInExplorer(target) } })
     if (!multi) {
-      items.push({ icon: '⊞', iconColor: 'var(--text-muted)', label: 'Windows のメニューを表示…', key: '', onClick: () => { const cx = x, cy = y; closeCtx(); void showOsContextMenuForSel(cx, cy) } })
+      items.push({ icon: '⊞', iconColor: 'var(--text-muted)', label: 'Windows のメニューを表示…', key: '', onClick: () => { const cx = x, cy = y; closeCtx(); void showOsContextMenuForSel(cx, cy, target) } })
     }
     items.push({ icon: '★', iconColor: '#B7791F', label: 'ブックマークに追加', key: '', onClick: () => { closeCtx(); addBookmark() } })
     if (extTools.tortoiseSvn) {
       items.push({ icon: '🐢', iconColor: '#2F8F5B', label: 'TortoiseSVN', key: '', arrow: true, subId: 'svn', onClick: () => openSub('svn') })
     }
     if (extTools.winmerge && selCount <= 3) {
-      items.push({ icon: '⇄', iconColor: '#6A5BD0', label: selCount === 2 ? 'WinMergeで比較' : 'WinMergeで開く', key: '', onClick: () => { const paths = targetAbs(); closeCtx(); void runWinMerge(paths) } })
+      items.push({ icon: '⇄', iconColor: '#6A5BD0', label: selCount === 2 ? 'WinMergeで比較' : 'WinMergeで開く', key: '', onClick: () => { closeCtx(); void runWinMerge(targets) } })
     }
     items.push({ icon: '⋯', iconColor: 'var(--text-muted)', label: 'その他のアクション', key: '', arrow: true, subId: 'more', onClick: () => openSub('more') })
     items.push({ divider: true })
-    if (!multi) items.push({ icon: '🛡', iconColor: 'var(--warn)', label: '管理者として実行', key: '', onClick: () => { closeCtx(); runAsAdmin() } })
-    items.push({ icon: 'ℹ', iconColor: 'var(--text-muted)', label: 'プロパティ', key: 'Alt+Enter', onClick: () => { closeCtx(); shellProperties() } })
+    if (!multi) items.push({ icon: '🛡', iconColor: 'var(--warn)', label: '管理者として実行', key: '', onClick: () => { closeCtx(); runAsAdmin(target) } })
+    items.push({ icon: 'ℹ', iconColor: 'var(--text-muted)', label: 'プロパティ', key: 'Alt+Enter', onClick: () => { closeCtx(); shellProperties(target) } })
   }
 
   const filtered = ql ? items.filter(it => 'divider' in it && it.divider ? false : !('label' in it) ? false : (it as { label: string }).label.toLowerCase().includes(ql)) : items
@@ -304,9 +309,8 @@ export default function ContextMenu() {
           <div style={{ position: 'absolute', left: W - 6, top: subTopFor('svn'), width: 200, padding: 5, background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 9, boxShadow: '0 14px 40px var(--shadow)' }}>
             {SVN_ITEMS.map(it => (
               <CtxItem key={it.cmd} icon={it.icon} iconColor={it.iconColor} label={it.label} shortcut="" onClick={() => {
-                const paths = targetAbs()
                 closeCtx()
-                void runTortoiseSvn(it.cmd, paths)
+                void runTortoiseSvn(it.cmd, targets)
               }} onEnter={() => {}} />
             ))}
           </div>
@@ -316,8 +320,8 @@ export default function ContextMenu() {
             {SUB_ITEMS.map(it => (
               <CtxItem key={it.label} icon={it.icon} iconColor={it.iconColor} label={it.label} shortcut="" onClick={() => {
                 closeCtx()
-                if (it.label === 'VS Code で開く') openInVscode()
-                else if (it.label === 'ターミナルで開く') openInTerminal()
+                if (it.label === 'VS Code で開く') openInVscode(folderTarget)
+                else if (it.label === 'ターミナルで開く') openInTerminal(folderTarget)
                 else showToast(it.label)
               }} onEnter={() => {}} />
             ))}
