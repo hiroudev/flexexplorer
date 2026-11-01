@@ -474,6 +474,53 @@ pub(crate) fn read_saved(path: &Path, valid: impl Fn(&str) -> bool) -> Result<Op
     }
 }
 
+/// Longest name `safe_stem` keeps; `MAX_NAME` in bundle.ts is the same.
+const MAX_STEM: usize = 120;
+
+/// DOS device names: Windows opens `CON.json` as the console whatever the
+/// extension, so writing it fails and reading it blocks. Compared in ASCII
+/// only, as `RESERVED_NAME` in bundle.ts is.
+fn reserved_device(stem: &str) -> bool {
+    let base = stem.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$")
+        || (base.chars().count() == 4
+            && (base.starts_with("COM") || base.starts_with("LPT"))
+            && base.chars().last().is_some_and(|c| "123456789¹²³".contains(c)))
+}
+
+/// At most `MAX_STEM` characters, without trailing dots or white space.
+fn cut_stem(s: &str) -> String {
+    let s: String = s.chars().take(MAX_STEM).collect();
+    s.trim_end_matches(|c: char| c == '.' || c.is_whitespace()).to_string()
+}
+
+/// `name` made into one plain file name (without extension) in a folder of
+/// the app's own: no path or control characters, no trailing dots or
+/// spaces, at most `MAX_STEM` characters, and `_` in front of a device name
+/// (checked on the final name, so cutting can't turn one back into "CON").
+/// Applying it twice gives the same name. `cleanWorkspaceName` (bundle.ts)
+/// follows the same rules, so the name the UI shows is the name the file gets.
+pub(crate) fn safe_stem(name: &str, fallback: &str) -> String {
+    let s: String = name.chars().filter(|c| !c.is_control() && !"\\/:*?\"<>|".contains(*c)).collect();
+    let mut s = cut_stem(s.trim());
+    if reserved_device(&s) {
+        s = cut_stem(&format!("_{s}"));
+    }
+    if s.is_empty() { fallback.to_string() } else { s }
+}
+
+/// A stem that names exactly one file in a folder of the app's own once an
+/// extension is put after it: what `list_workspaces` reports for a file
+/// copied in by hand can be longer than `safe_stem` keeps, or end in a dot
+/// (`report..json` lists as `report.`). Only path and device names are out.
+pub(crate) fn plain_stem(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.chars().any(|c| c.is_control() || "\\/:*?\"<>|".contains(c))
+        && !reserved_device(name)
+}
+
 /// Why `name` can't be a file name on Windows, if it can't.
 fn bad_name(name: &str) -> Option<&'static str> {
     if name.is_empty() || name == "." || name == ".." {

@@ -10,22 +10,10 @@
 import type { StoreApi } from 'zustand'
 import type { AppState } from './types'
 import { visibleSelection } from './store/useStore'
+// Pure, so the export file checks (and their node self-check) share them.
+export { keyName, isModifierKey, comboOf } from './utils/bundle'
 
 type Store = AppState & Record<string, any>
-
-/** Human-readable name for the non-modifier half of a combo. */
-export function keyName(key: string): string {
-  switch (key) {
-    case ' ': return 'Space'
-    case 'ArrowUp': return '↑'
-    case 'ArrowDown': return '↓'
-    case 'ArrowLeft': return '←'
-    case 'ArrowRight': return '→'
-    case 'Delete': return 'Del'
-    case 'Escape': return 'Esc'
-    default: return key.length === 1 ? key.toUpperCase() : key
-  }
-}
 
 /** Whether this keystroke belongs to an IME composition (Japanese input
  * being converted). Chromium reports the Enter that confirms a conversion as
@@ -35,23 +23,6 @@ export function keyName(key: string): string {
 export function isComposing(e: KeyboardEvent | React.KeyboardEvent): boolean {
   const ne = 'nativeEvent' in e ? e.nativeEvent : e
   return ne.isComposing || ne.keyCode === 229
-}
-
-/** True for the modifier keys themselves, which can't stand alone as a combo. */
-export function isModifierKey(key: string): boolean {
-  return key === 'Control' || key === 'Alt' || key === 'Shift' || key === 'Meta'
-}
-
-/** Canonical name for a key event, e.g. "Ctrl+Shift+P", "Alt+↑", "F2".
- * Modifier order is fixed (Ctrl, Alt, Shift) so equal combos compare equal. */
-export function comboOf(e: KeyboardEvent | React.KeyboardEvent): string {
-  const parts: string[] = []
-  if (e.ctrlKey || e.metaKey) parts.push('Ctrl')
-  if (e.altKey) parts.push('Alt')
-  if (e.shiftKey) parts.push('Shift')
-  if (isModifierKey(e.key)) return parts.join('+')
-  parts.push(keyName(e.key))
-  return parts.join('+')
 }
 
 /** Moves DOM focus into the toolbar search box (see TitleBar's SearchBox). */

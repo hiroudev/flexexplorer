@@ -1,3 +1,6 @@
+import type { SectionId, ImportPreview } from './utils/bundle'
+import type { FlexTheme } from 'flex-design/themes/presets.js'
+
 export interface FileEntry {
   name: string
   folder?: boolean
@@ -160,7 +163,14 @@ export interface ColumnDef {
 }
 
 export type Modal = 'rename' | 'options' | 'workspaces' | 'guide' | 'transferReport' | null
-export type OptTab = 'appearance' | 'shortcuts' | 'files' | 'generations' | 'default' | 'win' | 'advanced'
+export type OptTab = 'appearance' | 'shortcuts' | 'files' | 'generations' | 'default' | 'win' | 'advanced' | 'backup'
+
+/** An export file picked for import, waiting on the preview (オプション >
+ * バックアップ): either why it can't be read, or what passed the checks and
+ * which sections to take. */
+export type ImportDraft =
+  | { fileName: string; error: string }
+  | ({ fileName: string; error?: undefined; pick: Partial<Record<SectionId, boolean>>; busy?: boolean } & ImportPreview<FlexTheme>)
 
 export interface AppState {
   theme: string
@@ -183,7 +193,7 @@ export interface AppState {
   toast: string | null
   /** Offered by the toast's ↩ button. Only actions that can genuinely be
    * undone set this — a label alone would promise something nothing delivers. */
-  undo: { label: string; kind: 'group' | 'report' } | null
+  undo: { label: string; kind: 'group' | 'report' | 'import' } | null
   capturing: string | null
   binds: Record<string, string>
   rename: { rules: RenameRule[]; addOpen: boolean }
@@ -194,13 +204,18 @@ export interface AppState {
   pins: string[]
   recent: string[]
   maximized: boolean
-  containerW: number
   drives: Drive[]
   bookmarks: Bookmark[]
   recentPaths: string[]
   clip: Clipboard | null
   home: string
   workspaces: string[]
+  /** What each saved workspace file holds, checked when the list is read:
+   * a file copied in by hand may not open, or may point at shares and
+   * drives this PC doesn't have. */
+  workspaceInfo: Record<string, { broken?: string; unc: string[]; missingDrives: string[] }>
+  /** Where the workspace files are (shown on the workspace screen). */
+  workspaceDir: string
   layouts: LayoutGroup[]
   activeLayout: number
   addressEdit: number | null
@@ -250,6 +265,7 @@ export interface AppState {
     kind: 'delete' | 'delete-permanent'
     paths: string[]
   } | null
+  importDraft: ImportDraft | null
   /** Highlight the newest file of each generation set (see utils/generations). */
   genHighlight: boolean
   /** User overrides for how names are grouped into generation sets. */

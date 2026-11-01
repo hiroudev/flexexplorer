@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react'
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react'
 import { useStore, NOTE_MIN_H, NOTE_MAX_H, navAvailability, absAt } from '../store/useStore'
 import { iconOf, visibleIndices, fmt } from '../utils/fileUtils'
 import { PANE_MIME } from './LayoutTabs'
@@ -48,6 +48,8 @@ function visibleColumns(columns: ColumnDef[], pw: number): ColumnDef[] {
   if (pw < 220) vis = vis.filter(c => c.id !== 'date')
   return vis
 }
+
+const HEADER_H = 26
 
 function gridTemplate(cols: ColumnDef[]): string {
   // Every column is a fixed, resizable width; a trailing flexible track
@@ -340,7 +342,9 @@ function ColumnHeader({ pi, cols, gridCols, sortKey, sortDir }: {
   const [overId, setOverId] = useState<ColumnId | null>(null)
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: gridCols, alignItems: 'center', height: 26, flex: '0 0 26px', padding: '0 10px', gap: 8, fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', background: 'var(--bg-panel)' }}>
+    // Sticky inside the list's scroll area, so it scrolls sideways with the
+    // rows and stays put vertically.
+    <div style={{ position: 'sticky', top: 0, zIndex: 3, display: 'grid', gridTemplateColumns: gridCols, alignItems: 'stretch', height: HEADER_H, padding: '0 10px', gap: 8, fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', background: 'var(--bg-panel)', boxSizing: 'border-box' }}>
       {cols.map(col => (
         <div
           key={col.id}
@@ -356,12 +360,15 @@ function ColumnHeader({ pi, cols, gridCols, sortKey, sortDir }: {
         >
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: sortKey === col.id ? 'var(--accent)' : undefined, fontWeight: sortKey === col.id ? 700 : 600 }}>{COL_LABEL[col.id]}</span>
           {sortKey === col.id && <span style={{ fontSize: 9, color: 'var(--accent)', flex: '0 0 auto' }}>{sortDir === -1 ? '▼' : '▲'}</span>}
+          {/* Centred on the gap after the column (gap 8 → 4px past its edge),
+              with a divider line so the boundary shows before it is hovered. */}
           <span
+            className="col-grip"
             onMouseDown={e => { e.preventDefault(); e.stopPropagation(); startColDrag(pi, col.id, e.clientX, col.w) }}
             onClick={e => e.stopPropagation()}
             draggable={false}
             title="ドラッグで列幅を調整"
-            style={{ position: 'absolute', right: -8, top: -6, width: 12, height: 38, cursor: 'col-resize', zIndex: 2 }}
+            style={{ position: 'absolute', right: -10, top: 0, bottom: 0, width: 12, cursor: 'col-resize', zIndex: 2 }}
           />
         </div>
       ))}
@@ -529,8 +536,6 @@ function FolderNotePanel({ path }: { path: string[] }) {
 
 export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: number; spanCols: number }) {
   const activePane = useStore(s => s.activePane)
-  const paneCols = useStore(s => s.gridCols)
-  const containerW = useStore(s => s.containerW)
   const search = useStore(s => s.search)
   const searchMode = useStore(s => s.searchMode)
   const dimInactive = useStore(s => s.opt.dimInactive)
@@ -579,7 +584,20 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
     () => (genHighlight ? latestGenerationIndices(tab.files, genRules) : new Set<number>()),
     [genHighlight, genRules, tab.files],
   )
-  const pw = (containerW || 900) / Math.max(1, paneCols) * spanCols - 18
+  // The pane's real width, not an even share of the grid: after a splitter
+  // drag the panes differ, and an even share kept every column in a 100px
+  // pane (and hid them in a wide one).
+  const paneRef = useRef<HTMLDivElement>(null)
+  const [pw, setPw] = useState(900)
+  useLayoutEffect(() => {
+    const el = paneRef.current
+    if (!el) return
+    const measure = () => setPw(el.clientWidth - 18)
+    measure()
+    const obs = new ResizeObserver(measure)
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [])
   const cols = visibleColumns(tab.columns, pw)
   const gridCols = gridTemplate(cols)
   const q = searchMode === 'filter' ? search.trim().toLowerCase() : ''
@@ -599,6 +617,16 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
     const el = listRef.current?.querySelector('[data-focused="1"]') as HTMLElement | null
     el?.scrollIntoView({ block: 'nearest' })
   }, [tab.focus, tab.id, isActive])
+
+  // Keyboard focus follows the active pane. Tab (cyclePane) only changes the
+  // store, so ←/→ kept scrolling the list that had been clicked last. Inputs
+  // keep their focus.
+  useEffect(() => {
+    const el = listRef.current
+    if (!isActive || !el) return
+    const cur = document.activeElement
+    if (cur !== el && cur instanceof HTMLElement && cur.classList.contains('file-list')) el.focus({ preventScroll: true })
+  }, [isActive])
 
   const paneStyle: React.CSSProperties = {
     // In the 2-pane split layout (App.tsx) this is a plain block child of a
@@ -648,6 +676,7 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
 
   return (
     <div
+      ref={paneRef}
       onMouseDown={() => setActivePane(pi)}
       onDragOver={onPaneDragOver}
       onDragLeave={() => setPaneDragOver(false)}
@@ -830,12 +859,19 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
           <AddressContextMenu pi={pi} path={tab.path} x={addrCtx.x} y={addrCtx.y} onClose={() => setAddrCtx(null)} />
         )}
 
-        {/* Column header */}
-        <ColumnHeader pi={pi} cols={cols} gridCols={gridCols} sortKey={tab.sortKey} sortDir={tab.sortDir} />
-
-        {/* File list */}
+        {/* File list, with the column header inside the same scroll area:
+            columns wider than the pane scroll sideways, header included. */}
         <div
           ref={listRef}
+          // Focusable so the sideways scroll can be reached from the keyboard
+          // (←/→ scroll it natively; ↑/↓ still move the selection).
+          tabIndex={0}
+          role="region"
+          aria-label={`ペイン ${pi + 1} のファイル一覧（${tab.title}）`}
+          // Focus reached by Tab from the sticky note or elsewhere makes this
+          // the pane the keys act on, as a click does.
+          onFocus={() => { if (!isActive) setActivePane(pi) }}
+          className="file-list"
           onContextMenu={e => { if (e.target === e.currentTarget) { e.preventDefault(); openCtxBg(pi, e.clientX, e.clientY) } }}
           onDragOver={e => {
             if (!e.dataTransfer.types.includes(FILE_MIME)) return
@@ -856,28 +892,33 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
             // Anywhere in the empty list means "into the folder being shown".
             void dropOnFolder(tab.path, paths, dropMode(e, dirAbs, paths[0]), srcPi)
           }}
-          style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', position: 'relative', outline: listDropOver ? '2px solid var(--accent)' : 'none', outlineOffset: -2 }}
+          style={{ flex: 1, overflow: 'auto', position: 'relative', scrollPaddingTop: HEADER_H, outline: listDropOver ? '2px solid var(--accent)' : 'none', outlineOffset: -2 }}
         >
-          {vis.map((idx, row) => (
-            <FileRow
-              key={tab.files[idx].name + idx}
-              file={tab.files[idx]}
-              idx={idx}
-              pi={pi}
-              cols={cols}
-              gridCols={gridCols}
-              isActive={isActive}
-              selected={tab.sel.includes(idx)}
-              focused={tab.focus === idx}
-              tabIdx={row}
-              renaming={renamingIdx === idx}
-              soleSelected={tab.sel.length === 1}
-              cut={cutPaths.has((tab.files[idx].abs || joinPath([...tab.path, tab.files[idx].name])).toLowerCase())}
-              latest={latestIdx.has(idx)}
-              abs={tab.files[idx].abs || joinPath([...tab.path, tab.files[idx].name])}
-              selectedAbs={selAbs}
-            />
-          ))}
+          {/* As wide as the columns need, and never narrower than the pane,
+              so row backgrounds and the selection reach the right edge. */}
+          <div style={{ width: 'max-content', minWidth: '100%' }}>
+            <ColumnHeader pi={pi} cols={cols} gridCols={gridCols} sortKey={tab.sortKey} sortDir={tab.sortDir} />
+            {vis.map((idx, row) => (
+              <FileRow
+                key={tab.files[idx].name + idx}
+                file={tab.files[idx]}
+                idx={idx}
+                pi={pi}
+                cols={cols}
+                gridCols={gridCols}
+                isActive={isActive}
+                selected={tab.sel.includes(idx)}
+                focused={tab.focus === idx}
+                tabIdx={row}
+                renaming={renamingIdx === idx}
+                soleSelected={tab.sel.length === 1}
+                cut={cutPaths.has((tab.files[idx].abs || joinPath([...tab.path, tab.files[idx].name])).toLowerCase())}
+                latest={latestIdx.has(idx)}
+                abs={tab.files[idx].abs || joinPath([...tab.path, tab.files[idx].name])}
+                selectedAbs={selAbs}
+              />
+            ))}
+          </div>
         </div>
 
         {/* Folder sticky memo (private, stored per folder) */}

@@ -9,16 +9,8 @@ import { ThemePreview } from 'flex-design/components'
 import ThemeDesignerModal from './ThemeDesignerModal'
 import { comboOf, isModifierKey } from '../../keys'
 import { previewGroups } from '../../utils/generations'
-
-function downloadJson(filename: string, json: string) {
-  const blob = new Blob([json], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
+import { SECTIONS, presentSections, sectionCount } from '../../utils/bundle'
+import type { SectionId, WsItem } from '../../utils/bundle'
 
 const NAV: { id: OptTab; label: string; icon: string }[] = [
   { id: 'appearance', label: '外観', icon: '◑' },
@@ -28,6 +20,7 @@ const NAV: { id: OptTab; label: string; icon: string }[] = [
   { id: 'default', label: 'デフォルト動作', icon: '⚙' },
   { id: 'win', label: 'Windows 統合', icon: '⊞' },
   { id: 'advanced', label: '詳細設定', icon: '⚗' },
+  { id: 'backup', label: 'バックアップ', icon: '⇅' },
 ]
 
 const ACCENT_PRESETS = [
@@ -41,12 +34,13 @@ const SHORTCUT_GROUPS = [
   { title: '検索', items: [['find.filter','フィルタ検索','Ctrl+F'],['find.global','グローバル検索','Ctrl+Shift+F']] },
 ]
 
-function Select<T extends string>({ value, onChange, options }: { value: T; onChange: (v: T) => void; options: { value: T; label: string }[] }) {
+function Select<T extends string>({ value, onChange, options, label }: { value: T; onChange: (v: T) => void; options: { value: T; label: string }[]; label?: string }) {
   return (
     <select
+      aria-label={label}
       value={value}
       onChange={e => onChange(e.target.value as T)}
-      style={{ height: 28, padding: '0 8px', borderRadius: 5, border: '1px solid var(--border-strong)', background: 'var(--bg-page)', color: 'var(--text)', fontFamily: 'var(--font)', fontSize: 12.5, outline: 'none', cursor: 'default' }}
+      style={{ height: 28, padding: '0 8px', borderRadius: 5, border: '1px solid var(--border-strong)', background: 'var(--bg-page)', color: 'var(--text)', fontFamily: 'var(--font)', fontSize: 12.5, cursor: 'default' }}
     >
       {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
     </select>
@@ -117,7 +111,7 @@ function AppearanceTab() {
 
   function exportCustomTheme(theme: FlexTheme) {
     const json = serializeFlexThemeFile({ theme, meta: { name: theme.label, sub: theme.sub } })
-    downloadJson(`${theme.key.replace(/^custom:/, '')}.flextheme.json`, json)
+    void useStore.getState().saveExport(`FlexExplorer_テーマ-${theme.label}`, '.flextheme.json', json)
   }
 
   function removeCustomTheme(theme: FlexTheme) {
@@ -269,6 +263,7 @@ function ShortcutsTab() {
   const quickOpenHotkey = useStore(s => s.quickOpenHotkey)
   const [filter, setFilter] = useState('')
   const fl = filter.trim().toLowerCase()
+  const importRef = useRef<HTMLInputElement>(null)
 
   const allBindValues = Object.values(binds)
   const conflicts = new Set(allBindValues.filter((v, i) => allBindValues.indexOf(v) !== i))
@@ -298,7 +293,7 @@ function ShortcutsTab() {
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px', padding: '9px 10px', alignItems: 'center', fontSize: 12.5 }}>
           <div>
             <div style={{ color: 'var(--text)' }}>クイックオープン</div>
-            <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>FlexExplorerにフォーカスが無くても呼び出せます。パスを入力してtmpグループの新規ペインで開きます</div>
+            <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>FlexExplorerにフォーカスが無くても呼び出せます。パスを入力してtmpグループの新規ペインで開きます。ほかのアプリのキーを奪わないよう、Ctrl+Alt・Ctrl+Shift・Alt+Shift のどれかを含めてください</div>
           </div>
           <span
             onClick={() => startCapture(QUICK_OPEN_CAPTURE_ID)}
@@ -360,8 +355,10 @@ function ShortcutsTab() {
       </div>
 
       <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
-        <SmallBtn onClick={() => useStore.getState().exportShortcuts()}>エクスポート</SmallBtn>
-        <SmallBtn onClick={() => useStore.getState().importShortcuts()}>インポート</SmallBtn>
+        <SmallBtn onClick={() => void useStore.getState().exportBundle(['shortcuts'])}>エクスポート</SmallBtn>
+        <SmallBtn onClick={() => importRef.current?.click()}>インポート…</SmallBtn>
+        <input ref={importRef} type="file" accept=".json,application/json" aria-label="読み込むショートカットのファイル" style={{ display: 'none' }}
+          onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void useStore.getState().openImport(f, ['shortcuts']) }} />
         <SmallBtn onClick={() => useStore.getState().resetOptCategory('shortcuts')} danger>リセット</SmallBtn>
       </div>
     </div>
@@ -521,15 +518,212 @@ function AdvancedTab() {
   )
 }
 
-function SmallBtn({ onClick, danger, children }: { onClick: () => void; danger?: boolean; children: React.ReactNode }) {
-  const [hover, setHover] = useState(false)
+/** バックアップ: settings and workspaces to one file and back (see utils/bundle). */
+function BackupTab() {
+  const draft = useStore(s => s.importDraft)
+  const exportBundle = useStore(s => s.exportBundle)
+  const openImport = useStore(s => s.openImport)
+  // Notes are private memos, so they only go out when asked for.
+  const [pick, setPick] = useState<Record<SectionId, boolean>>(() => Object.fromEntries(SECTIONS.map(x => [x.id, x.id !== 'notes'])) as Record<SectionId, boolean>)
+  // One export at a time: a second click made "… (2).flexexplorer.json".
+  const [exporting, setExporting] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
+  const chosen = SECTIONS.filter(x => pick[x.id]).map(x => x.id)
+  // When the preview closes (taken, or やめる) focus would fall to the page;
+  // it goes back to the button that opened it.
+  const hadDraft = useRef(false)
+  useEffect(() => {
+    if (hadDraft.current && !draft) document.getElementById('backup-pick-file')?.focus()
+    hadDraft.current = !!draft
+  }, [draft])
+
   return (
-    <div
+    <div>
+      <Section title="書き出す" />
+      <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 8 }}>
+        選んだ項目を1つのファイル（.flexexplorer.json）にまとめて「ダウンロード」フォルダに保存し、エクスプローラーで表示します。
+        最近使った場所とパネルの幅は入りません。
+      </div>
+      <fieldset style={{ border: 'none', margin: 0, padding: 0 }}>
+        <legend style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>書き出す項目</legend>
+        {SECTIONS.map(x => (
+          <CheckRow key={x.id} label={x.label} desc={x.desc} checked={pick[x.id]} onChange={v => setPick(p => ({ ...p, [x.id]: v }))} />
+        ))}
+      </fieldset>
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <SmallBtn
+          onClick={() => { setExporting(true); void exportBundle(chosen).finally(() => setExporting(false)) }}
+          disabled={!chosen.length || exporting}
+          minWidth={88}
+        >{exporting ? '書き出し中…' : '書き出す'}</SmallBtn>
+      </div>
+
+      <Section title="読み込む" />
+      <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 8 }}>
+        中身を確かめてから、取り込む項目を選べます。取り込む前の状態は <code>%APPDATA%\FlexExplorer\backups</code> に自動で保存し（新しい5件）、
+        取り込んだ直後なら通知の「元に戻す」で戻せます。あとから戻すときは、そこにあるファイル（before-import-…）をここで読み込みます。
+        そのときは足すのではなく、選んだ項目をファイルの状態に置き換えます。
+      </div>
+      <SmallBtn id="backup-pick-file" onClick={() => fileRef.current?.click()} disabled={!!draft && draft.error === undefined && draft.busy}>ファイルを選ぶ…</SmallBtn>
+      <input ref={fileRef} type="file" accept=".json,application/json" aria-label="読み込むファイル" style={{ display: 'none' }}
+        onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void openImport(f) }} />
+      {draft && <ImportPreviewPanel />}
+    </div>
+  )
+}
+
+function CheckRow({ label, desc, checked, onChange, disabled, children }: { label: string; desc?: string; checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; children?: React.ReactNode }) {
+  return (
+    <div style={{ padding: '7px 0', borderBottom: '1px solid var(--border)' }}>
+      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'default' }}>
+        <input type="checkbox" checked={checked} disabled={disabled} onChange={e => onChange(e.target.checked)} style={{ margin: '2px 0 0', accentColor: 'var(--accent)', flex: '0 0 auto' }} />
+        <span style={{ flex: 1, minWidth: 0 }}>
+          <span style={{ fontSize: 12.5, color: 'var(--text)', fontWeight: 500 }}>{label}</span>
+          {desc && <span style={{ display: 'block', fontSize: 11, color: 'var(--text-muted)', marginTop: 1 }}>{desc}</span>}
+        </span>
+      </label>
+      {children}
+    </div>
+  )
+}
+
+function ImportPreviewPanel() {
+  const d = useStore(s => s.importDraft)
+  const setDraft = useStore(s => s.setImportDraft)
+  const applyImport = useStore(s => s.applyImport)
+  const quickOpenHotkey = useStore(s => s.quickOpenHotkey)
+  const ref = useRef<HTMLElement & HTMLDivElement>(null)
+  // It opens below the export list (and, from the shortcut page, on a tab
+  // switch), so bring it into view rather than leave it off-screen.
+  const fileName = d?.fileName
+  useEffect(() => { ref.current?.scrollIntoView({ block: 'nearest' }) }, [fileName, d?.error])
+  if (!d) return null
+
+  const box: React.CSSProperties = { marginTop: 12, border: '1px solid var(--border-strong)', borderRadius: 8, padding: '10px 12px' }
+  if (d.error !== undefined) {
+    return (
+      <div ref={ref} role="alert" style={{ ...box, borderColor: 'var(--danger)', background: 'var(--danger-soft)' }}>
+        <div style={{ fontSize: 12, fontWeight: 650, color: 'var(--danger)', overflowWrap: 'anywhere' }}>「{d.fileName}」を読み込めません</div>
+        <div style={{ fontSize: 11.5, color: 'var(--text)', marginTop: 4, lineHeight: 1.6 }}>{d.error}</div>
+        <div style={{ marginTop: 8 }}><SmallBtn onClick={() => setDraft(null)}>閉じる</SmallBtn></div>
+      </div>
+    )
+  }
+
+  const present = presentSections(d.clean, d.restore)
+  const chosen = present.filter(id => d.pick[id])
+  // Sections whose every item was turned away are listed too, with why.
+  const shown = SECTIONS.map(x => x.id).filter(id => present.includes(id) || (d.issues[id]?.length ?? 0) > 0)
+  const at = d.exportedAt && !Number.isNaN(Date.parse(d.exportedAt)) ? new Date(d.exportedAt).toLocaleString('ja-JP') : ''
+  const setWs = (name: string, choice: WsItem['choice']) => setDraft({ ...d, clean: { ...d.clean, workspaces: d.clean.workspaces!.map(w => (w.name === name ? { ...w, choice } : w)) } })
+  const sub: React.CSSProperties = { fontSize: 11, color: 'var(--text-muted)', margin: '3px 0 0 21px', overflowWrap: 'anywhere' }
+
+  return (
+    <section ref={ref} aria-labelledby="import-preview-title" style={box}>
+      <div id="import-preview-title" style={{ fontSize: 12.5, fontWeight: 650, color: 'var(--text)', overflowWrap: 'anywhere' }}>「{d.fileName}」の中身</div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+        {d.app ? `FlexExplorer ${d.app}` : 'FlexExplorer'}{at && ` で ${at} に書き出し`}
+      </div>
+
+      {d.restore && (
+        <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 6, background: 'var(--accent-soft)', border: '1px solid var(--accent)', fontSize: 11.5, color: 'var(--text)', lineHeight: 1.6 }}>
+          <b>取り込む前の自動バックアップです。</b>選んだ項目を、このファイルの状態に置き換えます（足すのではありません）。
+          ファイルに無い付箋と自作テーマは消え、同じ名前のワークスペースは上書きします。
+        </div>
+      )}
+
+      {(d.unc.length > 0 || d.missingDrives.length > 0) && (
+        <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 6, background: 'var(--warn-soft)', border: '1px solid var(--warn)', fontSize: 11.5, color: 'var(--text)', lineHeight: 1.6, overflowWrap: 'anywhere' }}>
+          {d.unc.length > 0 && (
+            <div>
+              <b>共有フォルダを開くタブ・ブックマークがあります（{d.unc.join('、')}）。</b>
+              開いた時点で、その相手に Windows のサインイン情報（NTLM）が送られます。他の人から受け取ったファイルなら、相手を確かめてから開いてください。
+            </div>
+          )}
+          {d.missingDrives.length > 0 && (
+            <div style={{ marginTop: d.unc.length ? 4 : 0 }}>
+              この PC に無いドライブ: <b>{d.missingDrives.join('、')}</b>。そこを開くタブは開けませんが、ほかのタブは開けます。
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* disabled while it is being taken: changing a choice then did nothing */}
+      <fieldset disabled={d.busy} style={{ border: 'none', margin: '6px 0 0', padding: 0, minWidth: 0 }}>
+        <legend style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>取り込む項目</legend>
+        {shown.map(id => {
+          const sec = SECTIONS.find(x => x.id === id)!
+          const issues = d.issues[id] ?? []
+          const has = present.includes(id)
+          return (
+            <CheckRow key={id} label={has ? `${sec.label}（${sectionCount(d.clean, id)}件）` : `${sec.label}（取り込めるものがありません）`} checked={has && !!d.pick[id]} disabled={!has} onChange={v => setDraft({ ...d, pick: { ...d.pick, [id]: v } })}>
+              {has && id === 'notes' && d.pick.notes && (
+                <div style={sub}>{d.restore ? 'このファイルの付箋に置き換えます。ファイルに無いフォルダの付箋は消えます。' : '今ある付箋に足します。同じフォルダの付箋はファイルの方で置き換えます。'}</div>
+              )}
+              {has && id === 'places' && d.pick.places && (
+                <div style={sub}>{d.restore ? 'このファイルのブックマーク・ピンに置き換えます。' : '今あるものに足します（同じ場所のブックマークは今のまま）。'}</div>
+              )}
+              {has && id === 'themes' && d.pick.themes && (d.restore || d.themeClash.length > 0) && (
+                <div style={sub}>
+                  {d.themeClash.length > 0 && <>同じテーマを上書きします: {d.themeClash.join('、')}。</>}
+                  {d.restore && 'ファイルに無い自作テーマは消えます。'}
+                </div>
+              )}
+              {has && id === 'shortcuts' && d.pick.shortcuts && d.clean.shortcuts!.quickOpenHotkey && (
+                <div style={sub}>グローバルホットキー: <b style={{ fontFamily: 'var(--mono)', color: 'var(--text)' }}>{d.clean.shortcuts!.quickOpenHotkey}</b>（今は {quickOpenHotkey}）。ほかのアプリでは、このキーが効かなくなります。</div>
+              )}
+              {has && id === 'workspaces' && d.pick.workspaces && d.clean.workspaces!.map(w => (
+                <div key={w.name} style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '5px 0 0 21px', fontSize: 12 }}>
+                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text)' }} title={w.name}>{w.name}</span>
+                  {w.unc.length > 0 && <Badge tone="warn">共有フォルダ</Badge>}
+                  {w.missingDrives.length > 0 && <Badge tone="warn">無いドライブ {w.missingDrives.join(' ')}</Badge>}
+                  <Select<WsItem['choice']>
+                    value={w.choice}
+                    label={`「${w.name}」の取り込み方`}
+                    onChange={v => setWs(w.name, v)}
+                    options={w.exists
+                      ? [{ value: 'rename', label: `別名で（${w.altName}）` }, { value: 'overwrite', label: '同名を上書き' }, { value: 'skip', label: '取り込まない' }]
+                      : [{ value: 'add', label: '取り込む' }, { value: 'skip', label: '取り込まない' }]}
+                  />
+                </div>
+              ))}
+              {issues.length > 0 && (
+                <details open={!has} style={{ margin: '4px 0 0 21px', fontSize: 11, color: 'var(--text-muted)' }}>
+                  <summary style={{ cursor: 'default', color: 'var(--text)', fontWeight: 600 }}>⚠ 取り込まない項目 {issues.length}件</summary>
+                  {issues.map((m, i) => <div key={i} style={{ overflowWrap: 'anywhere' }}>・{m}</div>)}
+                </details>
+              )}
+            </CheckRow>
+          )
+        })}
+      </fieldset>
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        {/* fixed width: 取り込み中… is longer and pushed やめる aside */}
+        <PrimaryBtn onClick={() => void applyImport()} disabled={!chosen.length || d.busy} minWidth={104}>{d.busy ? '取り込み中…' : '取り込む'}</PrimaryBtn>
+        <SmallBtn onClick={() => setDraft(null)} disabled={d.busy}>やめる</SmallBtn>
+      </div>
+    </section>
+  )
+}
+
+function Badge({ tone, children }: { tone: 'warn'; children: React.ReactNode }) {
+  return <span style={{ flex: '0 0 auto', fontSize: 10.5, padding: '1px 6px', borderRadius: 4, color: 'var(--text)', background: `var(--${tone}-soft)`, border: `1px solid var(--${tone})` }}>{children}</span>
+}
+
+function SmallBtn({ id, onClick, danger, disabled, minWidth, children }: { id?: string; onClick: () => void; danger?: boolean; disabled?: boolean; minWidth?: number; children: React.ReactNode }) {
+  const [hover, setHover] = useState(false)
+  const on = hover && !disabled
+  return (
+    <button
+      id={id}
+      type="button"
       onClick={onClick}
+      disabled={disabled}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      style={{ height: 26, padding: '0 10px', borderRadius: 5, border: `1px solid ${danger ? 'var(--danger)' : 'var(--border-strong)'}`, fontSize: 11.5, cursor: 'default', display: 'flex', alignItems: 'center', color: danger ? 'var(--danger)' : hover ? 'var(--text)' : 'var(--text-muted)', background: hover ? 'var(--bg-hover)' : 'transparent' }}
-    >{children}</div>
+      style={{ height: 26, padding: '0 10px', borderRadius: 5, border: `1px solid ${danger ? 'var(--danger)' : 'var(--border-strong)'}`, fontSize: 11.5, fontFamily: 'var(--font)', cursor: 'default', display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth, color: danger ? 'var(--danger)' : on ? 'var(--text)' : 'var(--text-muted)', background: on ? 'var(--bg-hover)' : 'transparent', opacity: disabled ? 0.5 : 1 }}
+    >{children}</button>
   )
 }
 
@@ -553,6 +747,7 @@ export default function OptionsModal() {
     default: <DefaultTab />,
     win: <WinTab />,
     advanced: <AdvancedTab />,
+    backup: <BackupTab />,
   }
 
   return (
@@ -563,7 +758,8 @@ export default function OptionsModal() {
       />
       <div style={{
         position: 'fixed', left: '50%', top: '50%', transform: 'translate(-50%,-50%)',
-        zIndex: 51, width: 760, height: 580,
+        // The minimum window is 560px tall, less than the dialog's usual height.
+        zIndex: 51, width: 760, height: 'min(580px, calc(100vh - 24px))',
         background: 'var(--bg-panel)', border: '1px solid var(--border)',
         borderRadius: 12, boxShadow: '0 24px 70px var(--shadow)',
         display: 'flex', flexDirection: 'column', fontFamily: 'var(--font)',
@@ -600,7 +796,7 @@ export default function OptionsModal() {
 
         {/* Footer */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '10px 20px', borderTop: '1px solid var(--border)', flex: '0 0 auto' }}>
-          <SmallBtn onClick={() => resetOptCategory(optTab)} danger>カテゴリをリセット</SmallBtn>
+          {optTab !== 'backup' && <SmallBtn onClick={() => resetOptCategory(optTab)} danger>カテゴリをリセット</SmallBtn>}
           <div style={{ flex: 1 }} />
           <PrimaryBtn onClick={closeModal}>閉じる</PrimaryBtn>
         </div>
@@ -612,26 +808,30 @@ export default function OptionsModal() {
 function NavItem({ icon, label, active, onClick }: { icon: string; label: string; active: boolean; onClick: () => void }) {
   const [hover, setHover] = useState(false)
   return (
-    <div
+    <button
+      type="button"
+      aria-current={active ? 'page' : undefined}
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      style={{ display: 'flex', alignItems: 'center', gap: 10, height: 32, padding: '0 14px', cursor: 'default', fontSize: 12.5, fontWeight: active ? 600 : 400, color: active ? 'var(--accent)' : hover ? 'var(--text)' : 'var(--text-muted)', background: active ? 'var(--accent-soft)' : hover ? 'var(--bg-hover)' : 'transparent', borderRight: active ? '2px solid var(--accent)' : '2px solid transparent' }}
+      style={{ display: 'flex', alignItems: 'center', gap: 10, height: 32, padding: '0 14px', border: 'none', textAlign: 'left', fontFamily: 'var(--font)', cursor: 'default', fontSize: 12.5, fontWeight: active ? 600 : 400, color: active ? 'var(--accent)' : hover ? 'var(--text)' : 'var(--text-muted)', background: active ? 'var(--accent-soft)' : hover ? 'var(--bg-hover)' : 'transparent', borderRight: active ? '2px solid var(--accent)' : '2px solid transparent' }}
     >
       <span style={{ width: 15, textAlign: 'center', fontSize: 13 }}>{icon}</span>
       {label}
-    </div>
+    </button>
   )
 }
 
-function PrimaryBtn({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
+function PrimaryBtn({ onClick, disabled, minWidth, children }: { onClick: () => void; disabled?: boolean; minWidth?: number; children: React.ReactNode }) {
   const [hover, setHover] = useState(false)
   return (
-    <div
+    <button
+      type="button"
       onClick={onClick}
+      disabled={disabled}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      style={{ height: 30, padding: '0 16px', borderRadius: 6, cursor: 'default', fontSize: 12.5, fontWeight: 550, display: 'flex', alignItems: 'center', color: 'var(--accent-contrast)', background: hover ? 'var(--accent-hover)' : 'var(--accent)' }}
-    >{children}</div>
+      style={{ height: 30, padding: '0 16px', borderRadius: 6, border: 'none', cursor: 'default', fontSize: 12.5, fontFamily: 'var(--font)', fontWeight: 550, display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth, color: 'var(--accent-contrast)', background: hover && !disabled ? 'var(--accent-hover)' : 'var(--accent)', opacity: disabled ? 0.5 : 1 }}
+    >{children}</button>
   )
 }

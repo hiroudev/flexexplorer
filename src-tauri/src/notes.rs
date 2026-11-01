@@ -81,6 +81,18 @@ pub fn notes_set(key: String, note: FolderNote) -> Result<(), String> {
     write_all(&map)
 }
 
+/// Sets and removes many notes with one write of notes.json (an import, or
+/// undoing one). One `notes_set` each rewrote the whole file every time.
+#[tauri::command]
+pub fn notes_apply(set: NoteMap, delete: Vec<String>) -> Result<(), String> {
+    let mut map = read_all()?;
+    for k in delete {
+        map.remove(&k);
+    }
+    map.extend(set);
+    write_all(&map)
+}
+
 /// Remove the note for `key` (no-op when it doesn't exist).
 #[tauri::command]
 pub fn notes_delete(key: String) -> Result<(), String> {

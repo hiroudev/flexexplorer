@@ -1,3 +1,4 @@
+mod backup;
 mod external;
 mod fs;
 mod icons;
@@ -71,6 +72,7 @@ pub fn run() {
             notes::notes_load,
             notes::notes_set,
             notes::notes_delete,
+            notes::notes_apply,
             external::external_tools_status,
             external::tortoise_svn_command,
             external::winmerge_compare,
@@ -78,6 +80,10 @@ pub fn run() {
             workspaces::list_workspaces,
             workspaces::load_workspace,
             workspaces::delete_workspace,
+            workspaces::workspace_dir,
+            backup::export_file,
+            backup::export_folder,
+            backup::write_backup,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FlexExplorer");

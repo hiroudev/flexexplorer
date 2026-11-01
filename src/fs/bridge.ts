@@ -422,6 +422,12 @@ export async function notesSet(key: string, note: FolderNote): Promise<void> {
   await invoke('notes_set', { key, note })
 }
 
+/** Sets and removes many notes with one write (an import, or undoing one). */
+export async function notesApply(set: Record<string, FolderNote>, del: string[]): Promise<void> {
+  if (!isTauri) return
+  await invoke('notes_apply', { set, delete: del })
+}
+
 export async function notesDelete(key: string): Promise<void> {
   if (!isTauri) return
   await invoke('notes_delete', { key })
@@ -454,8 +460,9 @@ export async function winmergeCompare(paths: string[]): Promise<void> {
 
 // ---- named workspaces (layout files) ----
 
-export async function saveWorkspace(name: string, content: string): Promise<void> {
-  await invoke('save_workspace', { name, content })
+/** `exclusive`: fail with an "EXISTS:" error instead of replacing one of that name. */
+export async function saveWorkspace(name: string, content: string, exclusive = false): Promise<void> {
+  await invoke('save_workspace', { name, content, exclusive })
 }
 
 export async function listWorkspaces(): Promise<string[]> {
@@ -469,6 +476,40 @@ export async function loadWorkspace(name: string): Promise<string> {
 
 export async function deleteWorkspace(name: string): Promise<void> {
   await invoke('delete_workspace', { name })
+}
+
+/** %APPDATA%\FlexExplorer\workspaces — one `<name>.json` per workspace. */
+export async function workspaceDir(): Promise<string> {
+  if (!isTauri) return '%APPDATA%\\FlexExplorer\\workspaces'
+  return invoke<string>('workspace_dir')
+}
+
+// ---- settings/workspace export files (see src-tauri/src/backup.rs) ----
+
+/** Saves `<stem><ext>` in the Downloads folder (never over an existing file)
+ * and resolves to the path written. The browser mock downloads it instead. */
+export async function exportFile(stem: string, ext: string, content: string): Promise<string> {
+  if (isTauri) return invoke<string>('export_file', { stem, ext, content })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([content], { type: 'application/json' }))
+  a.download = stem + ext
+  a.click()
+  URL.revokeObjectURL(a.href)
+  return stem + ext
+}
+
+/** Saves each `[stem, content]` as `<stem>.json` in a new folder in
+ * Downloads and resolves to the folder. The browser mock downloads each file. */
+export async function exportFolder(folder: string, files: [string, string][]): Promise<string> {
+  if (isTauri) return invoke<string>('export_folder', { folder, files })
+  for (const [stem, content] of files) await exportFile(stem, '.json', content)
+  return folder
+}
+
+/** Keeps the state from just before an import in %APPDATA%\FlexExplorer\backups. */
+export async function writeBackup(content: string): Promise<string> {
+  if (!isTauri) return ''
+  return invoke<string>('write_backup', { content })
 }
 
 // ---- native Windows shell icons (cached by extension) ----

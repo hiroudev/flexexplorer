@@ -1,2 +1,28 @@
 @import 'flex-design/css/tokens.css';
 @import 'flex-design/css/base.css';
+
+/* Column boundary in the file list header: a thin line always, the accent
+   while the grip is hovered. */
+.col-grip::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--border-strong);
+}
+.col-grip:hover::after {
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -0.5px;
+  background: var(--accent);
+}
+
+/* The list's inline outline (the drop target frame) would hide the focus
+   ring otherwise. */
+.file-list:focus-visible {
+  outline: 2px solid var(--accent) !important;
+  outline-offset: -2px;
+}

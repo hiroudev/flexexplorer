@@ -22,7 +22,6 @@ import { comboOf, runBinding, isComposing } from './keys'
 export default function App() {
   const dragMove = useStore(s => s.dragMove)
   const dragEnd = useStore(s => s.dragEnd)
-  const setContainerW = useStore(s => s.setContainerW)
   const closeCtx = useStore(s => s.closeCtx)
   const modal = useStore(s => s.modal)
   const paletteOpen = useStore(s => s.palette.open)
@@ -69,17 +68,6 @@ export default function App() {
     return () => { dead = true; un.forEach(u => u()) }
   }, [])
 
-  // Track pane container width for responsive columns
-  useEffect(() => {
-    const el = panesRef.current
-    if (!el) return
-    const obs = new ResizeObserver(entries => {
-      setContainerW(entries[0].contentRect.width)
-    })
-    obs.observe(el)
-    return () => obs.disconnect()
-  }, [setContainerW])
-
   // Global keyboard handler.
   //
   // Bindable actions are dispatched through `binds` (Options > ショートカット)
@@ -109,8 +97,9 @@ export default function App() {
       const combo = comboOf(e)
 
       // These few reach in from anywhere, including from inside a text field,
-      // because they're how you get *out* to another surface.
-      if (combo && (combo === binds['cmd.palette'] || combo === binds['cmd.options'] ||
+      // because they're how you get *out* to another surface — but only on
+      // Ctrl/Alt or an F key: one bound to plain "A" would eat that letter.
+      if (combo && (!inInput || /^(Ctrl|Alt)\+|(^|\+)F\d+$/.test(combo)) && (combo === binds['cmd.palette'] || combo === binds['cmd.options'] ||
           combo === binds['cmd.goto'] || combo === binds['cmd.workspaces'] || combo === binds['cmd.guide'])) {
         e.preventDefault(); runBinding(combo, binds, useStore); return
       }
@@ -122,7 +111,8 @@ export default function App() {
       // An open context menu acts on what it was opened for. Letting keys
       // through moved the selection behind it, opened files with Enter, and
       // Tab switched panes so that the menu's 削除 hit the other pane.
-      if (useStore.getState().ctx) return
+      // preventDefault too: the focused list would otherwise scroll behind it.
+      if (useStore.getState().ctx) { e.preventDefault(); return }
 
       // Ctrl+1…9 selects the nth tab of the active pane (fixed, not rebindable —
       // it's a family of ten combos rather than one action).
@@ -215,6 +205,8 @@ export default function App() {
 }
 
 const GUTTER = 8
+/** The grid's own padding, on every side. */
+const PAD = 8
 
 /** The resizable pane grid: `gridCols` columns × as many rows as the panes
  * need, with a draggable gutter track between every pair of tracks. */
@@ -239,9 +231,11 @@ function PaneGrid({ panesRef }: { panesRef: React.RefObject<HTMLDivElement | nul
     e.preventDefault()
     const el = panesRef.current
     if (!el) return
+    // clientWidth includes the padding, which no track gets: counting it
+    // made the boundary trail the cursor by 2% of the distance dragged.
     const total = axis === 'col'
-      ? el.clientWidth - GUTTER * (cols - 1)
-      : el.clientHeight - GUTTER * (rows - 1)
+      ? el.clientWidth - PAD * 2 - GUTTER * (cols - 1)
+      : el.clientHeight - PAD * 2 - GUTTER * (rows - 1)
     startTrackDrag(axis, index, axis === 'col' ? e.clientX : e.clientY, Math.max(1, total))
   }
 
@@ -250,7 +244,7 @@ function PaneGrid({ panesRef }: { panesRef: React.RefObject<HTMLDivElement | nul
       ref={panesRef as React.RefObject<HTMLDivElement>}
       data-panes
       style={{
-        flex: 1, display: 'grid', padding: 8, minWidth: 0, minHeight: 0, overflow: 'hidden',
+        flex: 1, display: 'grid', padding: PAD, minWidth: 0, minHeight: 0, overflow: 'hidden',
         gridTemplateColumns: template(cf),
         gridTemplateRows: template(rf),
       }}

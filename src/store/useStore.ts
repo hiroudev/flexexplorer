@@ -1,18 +1,23 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { THEMES } from 'flex-design/themes/presets.js'
-import { applyTheme } from 'flex-design/runtime/theme.js'
+import { applyTheme, loadCustomThemes, saveCustomTheme, deleteCustomTheme } from 'flex-design/runtime/theme.js'
+import { parseFlexThemeFile, serializeFlexThemeFile } from 'flex-design/theme-forge/schema.js'
+import type { FlexTheme } from 'flex-design/themes/presets.js'
 import type { AppState, FileEntry, Pane, PaneTab, RenameRule, OptTab, ColumnId, LayoutGroup, FolderNote, GenerationRule, TransferReport } from '../types'
 import type { ConflictChoice, TransferProgress, TransferDone } from '../fs/bridge'
 import { fmt, fmtDate, hashStr, uidFor, applyRules, visibleIndices, parsePastedPath } from '../utils/fileUtils'
 import { nameProblem } from '../utils/fileName'
+import { BUNDLE_KIND, BUNDLE_V, BUNDLE_EXT, BUNDLE_MAX_BYTES, SECTIONS, readBundle, presentSections, fileStamp, freeName, inspectWorkspace, globalHotkeyOk, cleanWorkspaceName } from '../utils/bundle'
+import type { Bundle, BundleSections, SectionId } from '../utils/bundle'
+import { writeQueue } from '../utils/writeQueue'
 import {
   isTauri, isRealPath, listDir, listDrives, homeDir, launchPath, openPath, splitPath, joinPath, renamePath,
   planTransfer, startTransfer, cancelTransfer as bridgeCancelTransfer, siblingFolders, resolveTarget,
   deleteEntries, createFolder, createNewItem as bridgeCreateNewItem, searchDir, copyText,
   shellVerb, showShellContextMenu, createShortcut, resolveShortcut, createPathShortcutText, revealInExplorer, openInTerminal, openInVscode, duplicateAsDatedCopy,
-  saveWorkspace, listWorkspaces, loadWorkspace, deleteWorkspace,
-  noteKey, notesLoad, notesSet, notesDelete,
+  saveWorkspace, listWorkspaces, loadWorkspace, deleteWorkspace, workspaceDir, exportFile, exportFolder, writeBackup,
+  noteKey, notesLoad, notesSet, notesDelete, notesApply,
   externalToolsStatus, tortoiseSvnCommand, winmergeCompare,
   focusMainWindow, registerGlobalShortcut, unregisterGlobalShortcut, openWorkspaceInNewWindow, winDestroy,
 } from '../fs/bridge'
@@ -441,7 +446,6 @@ interface Actions {
   toggleSidebar(): void
   setSearch(v: string): void
   toggleSearchMode(): void
-  setContainerW(w: number): void
   startAddressEdit(pi: number): void
   endAddressEdit(): void
   // drag
@@ -510,8 +514,31 @@ interface Actions {
   addGenRule(): void
   updateGenRule(id: string, patch: Partial<GenerationRule>): void
   removeGenRule(id: string): void
-  exportShortcuts(): void
-  importShortcuts(): void
+  // settings/workspace export & import (オプション > バックアップ)
+  /** Writes the chosen sections to the Downloads folder. */
+  exportBundle(sections: SectionId[]): Promise<void>
+  /** Writes one workspace as the plain `<name>.json` it is saved as, so it
+   * can be dropped into another PC's workspaces folder as it is. */
+  exportWorkspaceFile(name: string): Promise<void>
+  /** Every workspace as its own `<name>.json`, in one new folder in Downloads. */
+  exportAllWorkspaces(): Promise<void>
+  /** Shows the workspaces folder in Explorer. */
+  openWorkspaceFolder(): void
+  /** Checks a workspace file chosen on the workspace screen. A settings
+   * export goes to the import preview instead (and gives null) — only when
+   * it is the one file chosen (`alone`). */
+  readWorkspaceFile(file: File, alone: boolean): Promise<{ name: string; data: object; exists: boolean; altName: string } | null>
+  /** Saves a workspace read by `readWorkspaceFile`. Only `overwrite`
+   * replaces a file of that name; otherwise one that is there fails it. */
+  saveImportedWorkspace(name: string, data: object, overwrite: boolean): Promise<boolean>
+  /** Saves a ready-made file to the Downloads folder and shows it in Explorer. */
+  saveExport(stem: string, ext: string, content: string): Promise<void>
+  /** Reads an export file into `importDraft` for the preview. `only` limits
+   * what is ticked (the shortcut page's インポート takes just shortcuts). */
+  openImport(file: File, only?: SectionId[]): Promise<void>
+  setImportDraft(d: AppState['importDraft']): void
+  /** Backs up the current state, then applies the ticked sections. */
+  applyImport(): Promise<void>
   // palette
   openPalette(): void
   closePalette(): void
@@ -532,6 +559,146 @@ interface Actions {
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null
+
+/** What the last import changed, for the toast's 元に戻す: the state from
+ * just before it, plus which workspaces and notes it added or replaced. */
+interface ImportUndo {
+  backup: BundleSections
+  ids: SectionId[]
+  themes: FlexTheme[]
+  ws: { created: string[]; overwritten: string[] }
+  notes: { created: string[]; overwritten: string[] }
+}
+let lastImport: ImportUndo | null = null
+/** Reading, applying and undoing an import never overlap. */
+let importBusy = false
+
+/** The export file's content for these sections — the same function makes
+ * the pre-import backup. A workspace file that can't be read or opened (one
+ * copied in broken, say) is left out and named in `skipped`; a note that
+ * can't be read fails the whole thing rather than leaving a silent gap. */
+async function buildBundle(s: AppState, ids: SectionId[]): Promise<{ bundle: Bundle; skipped: string[] }> {
+  const sec: BundleSections = {}
+  const skipped: string[] = []
+  const has = (id: SectionId) => ids.includes(id)
+  if (has('appearance')) sec.appearance = { theme: s.theme, opt: s.opt }
+  if (has('behavior')) sec.behavior = { adv: s.adv, genHighlight: s.genHighlight, genRules: s.genRules }
+  if (has('shortcuts')) sec.shortcuts = { binds: s.binds, quickOpenHotkey: s.quickOpenHotkey }
+  if (has('places')) sec.places = { bookmarks: s.bookmarks, pins: s.pins }
+  if (has('themes')) sec.themes = loadCustomThemes().map(t => JSON.parse(serializeFlexThemeFile({ theme: t, meta: { name: t.label, sub: t.sub } })))
+  if (has('workspaces')) {
+    const names = isTauri ? await listWorkspaces() : []
+    const read = await Promise.all(names.map(async n => {
+      try {
+        const data = JSON.parse(await loadWorkspace(n))
+        return inspectWorkspace(JSON.stringify(data), []).ok ? [[n, data] as const] : (skipped.push(n), [])
+      } catch { skipped.push(n); return [] }
+    }))
+    // fromEntries, not assignment: a workspace called "__proto__" would
+    // otherwise set the prototype and drop out of the file.
+    sec.workspaces = Object.fromEntries(read.flat())
+    sec.defaultWorkspace = s.defaultWorkspace && s.defaultWorkspace in sec.workspaces ? s.defaultWorkspace : null
+  }
+  if (has('notes')) {
+    // What is on disk — another window may have changed a note since this one
+    // loaded them — plus this window's edits still waiting to be saved. A
+    // failed read fails the backup instead of passing for "no notes".
+    if (isTauri && !(await flushSaves())) throw new Error('保存できていない付箋があります')
+    sec.notes = isTauri ? await notesLoad() : s.notes
+  }
+  return { bundle: { kind: BUNDLE_KIND, v: BUNDLE_V, app: __APP_VERSION__, exportedAt: new Date().toISOString(), sections: sec }, skipped }
+}
+
+/** Drops the edits still waiting to be saved for `keys` (they would land on
+ * top of what is written next) and gives back how to queue them again if
+ * that write fails. */
+function holdNoteSaves(keys: string[]): () => void {
+  const waiting = keys.flatMap(k => { const w = noteSaveTimers.get(k); return w ? [[k, w.note] as const] : [] })
+  keys.forEach(cancelNoteSave)
+  return () => { for (const [k, n] of waiting) saveNoteDebounced(k, n) }
+}
+
+/** Drive roots ("C:") this PC has, for the missing-drive checks. */
+const driveRoots = (s: AppState) => s.drives.map(d => d.path.slice(0, 2).toUpperCase())
+
+/** A saved workspace, checked as an imported one is: the file may have been
+ * copied in from another PC. Throws why it can't be opened. */
+async function readWorkspace(name: string) {
+  const info = inspectWorkspace(await loadWorkspace(name), driveRoots(useStore.getState()))
+  if (!info.ok) throw new Error(info.reason)
+  return { ...info, data: info.data as SessionData }
+}
+
+/** What to say once when a workspace opens: tabs on drives this PC hasn't
+ * got stay empty, and a share is reached as soon as its tab opens. */
+function rootsNote(info: { unc: string[]; missingDrives: string[] }): string {
+  return [
+    info.missingDrives.length ? `この PC に無いドライブ ${info.missingDrives.join('・')} のタブは開けません` : '',
+    info.unc.length ? `共有フォルダ ${info.unc.join('・')} を開くタブがあります` : '',
+  ].filter(Boolean).join('。')
+}
+
+/** Puts back what the last import changed (the toast's 元に戻す). */
+async function undoImport() {
+  const u = lastImport
+  const st = useStore.getState
+  if (!u) return
+  if (importBusy) { st().showToast('取り込みの途中です。終わってから戻してください', { label: '↩ 元に戻す', kind: 'import' }); return }
+  lastImport = null
+  importBusy = true
+  const set = useStore.setState
+  const b = u.backup
+  const failed: string[] = []
+  const retry: ImportUndo = { backup: b, ids: [], themes: u.themes, ws: { created: [], overwritten: [] }, notes: { created: [], overwritten: [] } }
+  // One failure (a workspace removed meanwhile, a locked file, settings
+  // storage full) doesn't stop the rest from being put back.
+  const step = async (what: string, run: () => unknown) => {
+    try { await run(); return true } catch (err) { failed.push(`${what}（${String(err)}）`); return false }
+  }
+  try {
+    if (u.ids.includes('themes')) {
+      await step('自作テーマ', () => {
+        for (const t of loadCustomThemes()) if (!u.themes.some(x => x.key === t.key)) deleteCustomTheme(t.key)
+        for (const t of u.themes) saveCustomTheme(t)
+        // The theme in use may be one the import had replaced.
+        applyTheme(st().theme, document.documentElement)
+      })
+    }
+    const a = b.appearance, bh = b.behavior, pl = b.places, k = b.shortcuts
+    if (u.ids.includes('appearance') && a) await step('外観', () => { set({ opt: a.opt }); st().setOptTheme(a.theme) })
+    if (u.ids.includes('behavior') && bh) await step('動作・世代ファイル', () => set({ adv: bh.adv, genHighlight: bh.genHighlight, genRules: bh.genRules }))
+    if (u.ids.includes('places') && pl) await step('ブックマーク・ピン', () => set({ bookmarks: pl.bookmarks, pins: pl.pins }))
+    if (u.ids.includes('shortcuts') && k) {
+      await step('ショートカット', async () => {
+        set({ binds: k.binds })
+        await st().setQuickOpenHotkey(k.quickOpenHotkey)
+        // setQuickOpenHotkey keeps the old combo when the OS refuses the new one.
+        if (st().quickOpenHotkey !== k.quickOpenHotkey) throw new Error(`ホットキー ${k.quickOpenHotkey} を登録し直せません`)
+      })
+    }
+    if (u.ids.includes('workspaces') && b.workspaces) {
+      const old = b.workspaces
+      for (const n of u.ws.created) if (!(await step(`ワークスペース「${n}」の削除`, () => deleteWorkspace(n)))) retry.ws.created.push(n)
+      for (const n of u.ws.overwritten) if (!(await step(`ワークスペース「${n}」`, () => saveWorkspace(n, JSON.stringify(old[n]))))) retry.ws.overwritten.push(n)
+      set({ defaultWorkspace: b.defaultWorkspace ?? null })
+      await st().refreshWorkspaces()
+    }
+    if (u.ids.includes('notes') && b.notes && (u.notes.created.length || u.notes.overwritten.length)) {
+      const old = b.notes
+      const put = Object.fromEntries(u.notes.overwritten.map(key => [key, old[key]]))
+      const giveBack = holdNoteSaves([...u.notes.created, ...u.notes.overwritten])
+      const ok = await step('付箋', async () => {
+        try { await notesApply(put, u.notes.created) } catch (err) { giveBack(); throw err }
+        set(s => { const n = { ...s.notes, ...put }; for (const key of u.notes.created) delete n[key]; return { notes: n } })
+      })
+      if (!ok) retry.notes = u.notes
+    }
+  } finally { importBusy = false }
+  if (!failed.length) { st().showToast('取り込む前の状態に戻しました'); return }
+  retry.ids = [...(retry.ws.created.length || retry.ws.overwritten.length ? ['workspaces' as const] : []), ...(retry.notes.created.length || retry.notes.overwritten.length ? ['notes' as const] : [])]
+  if (retry.ids.length) lastImport = retry
+  st().showToast(`戻せなかったもの: ${failed.join('、')}`, retry.ids.length ? { label: '↩ もう一度戻す', kind: 'import' } : undefined)
+}
 let dragState: { type: string; startX: number; sidebarW: number; inspectorW: number; pane0Pct: number; paneW: number; colId?: ColumnId; colW?: number; colPi?: number; axis?: 'col' | 'row'; trackIndex?: number; totalPx?: number; fracs?: number[] } | null = null
 // Per-pane back/forward history of path segments, namespaced by layout group id (used under Tauri).
 const histBack: Record<string, string[][]> = {}
@@ -613,6 +780,16 @@ async function saveNote(key: string, note: FolderNote): Promise<boolean> {
   }
 }
 
+/** Drops an edit still waiting to be saved, so it can't land on top of a
+ * note that was just deleted or replaced. */
+function cancelNoteSave(key: string) {
+  const pending = noteSaveTimers.get(key)
+  if (pending) { if (pending.timer) clearTimeout(pending.timer); noteSaveTimers.delete(key) }
+  // Also one already queued on noteWrites: it checks this before writing.
+  noteGen.set(key, (noteGen.get(key) ?? 0) + 1)
+}
+const noteGen = new Map<string, number>()
+
 function saveNoteDebounced(key: string, note: FolderNote) {
   const prev = noteSaveTimers.get(key)
   if (prev?.timer) clearTimeout(prev.timer)
@@ -620,14 +797,18 @@ function saveNoteDebounced(key: string, note: FolderNote) {
     note,
     timer: setTimeout(() => {
       noteSaveTimers.delete(key)
-      void saveNote(key, note)
+      // Through the chain flushSaves waits on, so a backup taken while this
+      // write is in flight still sees it.
+      const gen = noteGen.get(key) ?? 0
+      const run = () => ((noteGen.get(key) ?? 0) === gen ? saveNote(key, note) : Promise.resolve(true))
+      noteWrites.push(run)
     }, 500),
   })
 }
 
 /** Set by 「保存せずに閉じる」: from then on closing stops asking about notes. */
 let discardUnsaved = false
-let flushChain: Promise<boolean> = Promise.resolve(true)
+const noteWrites = writeQueue()
 
 /** Writes now whatever the debounces are still holding — closing the window
  * within half a second of typing in a note used to lose that text. False when
@@ -647,8 +828,10 @@ function flushSaves(): Promise<boolean> {
     }
     return ok
   }
-  flushChain = flushChain.then(run, run)
-  return flushChain
+  // A debounce can fire while this runs and queue its save behind it; go
+  // round again until no edit is waiting on a timer (one whose save failed
+  // has none, and is not retried for ever).
+  return noteWrites.flush(run, () => !discardUnsaved && [...noteSaveTimers.values()].some(p => p.timer))
 }
 
 /** The end of every close this store decides on: nothing may start from
@@ -753,13 +936,14 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   pins: ['vscode', 'copypath'],
   recent: ['view.inspector', 'edit.bulk', 'find.filter'],
   maximized: false,
-  containerW: 900,
   drives: [],
   bookmarks: [],
   recentPaths: [],
   clip: null,
   home: '',
   workspaces: [],
+  workspaceInfo: {},
+  workspaceDir: '',
   layouts: [{ id: 'g' + rid(), name: 'グループ 1', panes: [], gridCols: 2, activePane: 0 }],
   activeLayout: 0,
   addressEdit: null,
@@ -770,6 +954,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   defaultWorkspace: null,
   quickOpen: { open: false },
   genHighlight: false,
+  importDraft: null,
   genRules: [],
   transfer: null,
   transferReport: null,
@@ -1068,10 +1253,12 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       const wsParam = new URLSearchParams(window.location.search).get('workspace')
       if (wsParam) {
         try {
-          const json = await loadWorkspace(wsParam)
+          const info = await readWorkspace(wsParam)
           // applyWorkspace restores the saved active pane itself (clamped to
           // what exists). Forcing 0 afterwards threw that choice away.
-          await get().applyWorkspace(JSON.parse(json) as SessionData)
+          await get().applyWorkspace(info.data)
+          const note = rootsNote(info)
+          if (note) get().showToast(`「${wsParam}」: ${note}`)
           // A second window shares the process's argv, so the launch folder
           // below belongs to the first window only — stop here.
           return
@@ -1085,9 +1272,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       const def = get().defaultWorkspace
       if (def) {
         try {
-          const json = await loadWorkspace(def)
-          await get().applyWorkspace(JSON.parse(json) as SessionData)
+          const info = await readWorkspace(def)
+          await get().applyWorkspace(info.data)
           loaded = true
+          const note = rootsNote(info)
+          if (note) get().showToast(`既定のワークスペース「${def}」: ${note}`)
         } catch (err) { get().showToast(`既定のワークスペース「${def}」を読めません: ` + String(err)) }
       }
       if (!loaded && get().adv.restore) {
@@ -2027,7 +2216,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
 
   setColumnWidth: (pi, id, w) => set(s => {
     const panes = clonePanes(s.panes); const t = panes[pi].tabs[panes[pi].active]
-    t.columns = t.columns.map(c => c.id === id ? { ...c, w: Math.max(60, Math.min(640, Math.round(w))) } : c)
+    t.columns = t.columns.map(c => c.id === id ? { ...c, w: Math.max(60, Math.round(w)) } : c)
     return { panes }
   }),
   reorderColumns: (pi, srcId, destId) => {
@@ -2138,7 +2327,6 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   toggleSidebar: () => set(s => ({ sidebarHidden: !s.sidebarHidden })),
   setSearch: (v) => set({ search: v }),
   toggleSearchMode: () => set(s => ({ searchMode: s.searchMode === 'filter' ? 'global' : 'filter' })),
-  setContainerW: (w) => set({ containerW: w }),
   startAddressEdit: (pi) => set({ addressEdit: pi }),
   endAddressEdit: () => set({ addressEdit: null }),
 
@@ -2214,7 +2402,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   },
 
   openModal: (m) => { set({ modal: m, ctx: null }); if (m === 'workspaces') void get().refreshWorkspaces() },
-  closeModal: () => set(s => ({ modal: null, capturing: null, rename: { ...s.rename, addOpen: false } })),
+  // An import that is already running keeps its draft until it finishes.
+  closeModal: () => set(s => ({ modal: null, capturing: null, rename: { ...s.rename, addOpen: false }, importDraft: s.importDraft?.error === undefined && s.importDraft?.busy ? s.importDraft : null })),
 
   applyWorkspace: async (data) => {
     try {
@@ -2284,7 +2473,22 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   },
 
   refreshWorkspaces: async () => {
-    try { set({ workspaces: await listWorkspaces() }) } catch { /* ignore */ }
+    const dir = get().workspaceDir || await workspaceDir().catch(() => '')
+    // The browser mock has no workspace files; whatever it shows stays.
+    if (!isTauri) { set({ workspaceDir: dir }); return }
+    try {
+      const names = await listWorkspaces()
+      const drives = driveRoots(get())
+      // Each file is read and checked, so one copied in from another PC that
+      // won't open says so in the list instead of failing when clicked.
+      const info = await Promise.all(names.map(async n => {
+        try {
+          const r = inspectWorkspace(await loadWorkspace(n), drives)
+          return [n, r.ok ? { unc: r.unc, missingDrives: r.missingDrives } : { broken: r.reason, unc: [], missingDrives: [] }] as const
+        } catch (err) { return [n, { broken: String(err), unc: [], missingDrives: [] }] as const }
+      }))
+      set({ workspaces: names, workspaceInfo: Object.fromEntries(info), workspaceDir: dir })
+    } catch { /* ignore */ }
   },
 
   saveWorkspaceAs: async (name) => {
@@ -2301,11 +2505,12 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   loadNamedWorkspace: async (name) => {
     if (!isTauri) return
     try {
-      const json = await loadWorkspace(name)
-      await get().applyWorkspace(JSON.parse(json) as SessionData)
+      const info = await readWorkspace(name)
+      await get().applyWorkspace(info.data)
       set({ modal: null })
-      get().showToast(`「${name}」を開きました`)
-    } catch (err) { get().showToast('読込失敗: ' + String(err)) }
+      const note = rootsNote(info)
+      get().showToast(`「${name}」を開きました${note ? `（${note}）` : ''}`)
+    } catch (err) { get().showToast(`「${name}」を開けません: ` + String(err)) }
   },
 
   openWorkspaceInNewWindow: async (name) => {
@@ -2412,8 +2617,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   removeNote: (key) => {
     // Cancel an edit still waiting to be saved: if it fired after the delete it
     // would write the note straight back (notes_set), resurrecting it.
-    const pending = noteSaveTimers.get(key)
-    if (pending) { if (pending.timer) clearTimeout(pending.timer); noteSaveTimers.delete(key) }
+    cancelNoteSave(key)
     set(s => { const n = { ...s.notes }; delete n[key]; return { notes: n, ctx: null } })
     void notesDelete(key).catch(noteSaveFailed)
     get().showToast('付箋メモを削除しました')
@@ -2510,11 +2714,302 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const id = get().capturing
     // The global quick-open hotkey isn't a cosmetic `binds` entry like the
     // rest of SHORTCUT_GROUPS — it has to be re-registered with the OS.
-    if (id === QUICK_OPEN_CAPTURE_ID) { set({ capturing: null }); void get().setQuickOpenHotkey(combo); return }
+    if (id === QUICK_OPEN_CAPTURE_ID) {
+      set({ capturing: null })
+      if (!globalHotkeyOk(combo)) { get().showToast(`${combo} は使えません。ほかのアプリのキーを奪わないよう、Ctrl+Alt・Ctrl+Shift・Alt+Shift のどれかを含めてください`); return }
+      void get().setQuickOpenHotkey(combo)
+      return
+    }
     set(s => ({ binds: { ...s.binds, [id!]: combo }, capturing: null }))
   },
-  exportShortcuts: () => get().showToast('shortcuts.json をエクスポートしました'),
-  importShortcuts: () => get().showToast('shortcuts.json を読み込みました'),
+  exportBundle: async (sections) => {
+    if (!sections.length) return
+    let b: Bundle, skipped: string[]
+    try { ({ bundle: b, skipped } = await buildBundle(get(), sections)) }
+    catch (err) { get().showToast('書き出せません: ' + String(err)); return }
+    const sec = b.sections
+    const empty = (id: SectionId) => (id === 'themes' && !sec.themes!.length)
+      || (id === 'workspaces' && !Object.keys(sec.workspaces!).length)
+      || (id === 'notes' && !Object.keys(sec.notes!).length)
+    if (sections.every(empty)) { get().showToast('書き出すものがありません'); return }
+    const text = JSON.stringify(b, null, 2)
+    if (new Blob([text]).size > BUNDLE_MAX_BYTES) { get().showToast(`${Math.round(BUNDLE_MAX_BYTES / 1048576)} MB を超えるため書き出せません（読み込めないファイルになります）`); return }
+    const what = sections.length === 1 ? SECTIONS.find(x => x.id === sections[0])!.label : '設定'
+    await get().saveExport(`FlexExplorer_${what}_${fileStamp(new Date())}`, BUNDLE_EXT, text)
+    if (skipped.length) get().showToast(`書き出しました。開けないワークスペース ${skipped.join('・')} は入っていません`)
+  },
+
+  exportWorkspaceFile: async (name) => {
+    try {
+      const info = await readWorkspace(name)
+      await get().saveExport(cleanWorkspaceName(name) || 'workspace', '.json', JSON.stringify(info.data, null, 2))
+    } catch (err) { get().showToast(`「${name}」を書き出せません: ` + String(err)) }
+  },
+
+  exportAllWorkspaces: async () => {
+    if (!isTauri) { get().showToast('書き出しはデスクトップアプリで利用できます'); return }
+    let names: string[]
+    try { names = await listWorkspaces() } catch (err) { get().showToast('一覧を読めません: ' + String(err)); return }
+    const files: [string, string][] = []
+    const skipped: string[] = []
+    for (const n of names) {
+      try { files.push([cleanWorkspaceName(n) || 'workspace', JSON.stringify((await readWorkspace(n)).data, null, 2)]) }
+      catch { skipped.push(n) }
+    }
+    if (!files.length) { get().showToast(skipped.length ? '開けるワークスペースがありません' : '書き出すワークスペースがありません'); return }
+    try {
+      const dir = await exportFolder(`FlexExplorer_ワークスペース_${fileStamp(new Date())}`, files)
+      revealInExplorer(dir).catch(() => { /* the toast still says where it is */ })
+      get().showToast(`${files.length}件を「ダウンロード」の ${dir.split(/[\\/]/).pop()} に書き出しました${skipped.length ? `（開けない ${skipped.join('・')} は入っていません）` : ''}`)
+    } catch (err) { get().showToast('書き出せません: ' + String(err)) }
+  },
+
+  openWorkspaceFolder: () => {
+    const dir = get().workspaceDir
+    if (!isTauri || !dir) { get().showToast('フォルダを開くのはデスクトップアプリで利用できます'); return }
+    openPath(splitPath(dir)).catch(err => get().showToast('フォルダを開けません: ' + String(err)))
+  },
+
+  readWorkspaceFile: async (file, alone) => {
+    const say = (m: string) => { get().showToast(`「${file.name}」を読み込めません: ${m}`); return null }
+    if (file.size > BUNDLE_MAX_BYTES) return say(`${Math.round(BUNDLE_MAX_BYTES / 1048576)} MB を超えています`)
+    let text: string
+    try { text = await file.text() } catch (err) { return say(String(err)) }
+    // A settings export (from 書き出す on the backup page, or an old
+    // per-workspace export) goes through the import preview.
+    try {
+      const d = JSON.parse(text)
+      if (d && typeof d === 'object' && d.kind === BUNDLE_KIND) {
+        if (!alone) return say('設定の書き出しファイルは、1つだけ選んで読み込んでください')
+        set({ modal: 'options' })
+        await get().openImport(file, ['workspaces'])
+        return null
+      }
+    } catch { /* inspectWorkspace says why */ }
+    const info = inspectWorkspace(text, driveRoots(get()))
+    if (!info.ok) return say(info.reason)
+    const name = cleanWorkspaceName(file.name.replace(/\.json$/i, ''))
+    if (!name) return say('ファイル名をワークスペースの名前に使えません')
+    let existing = get().workspaces
+    if (isTauri) { try { existing = await listWorkspaces() } catch { /* keep the list shown */ } }
+    const exists = existing.some(w => w.toLowerCase() === name.toLowerCase())
+    return { name, data: info.data, exists, altName: exists ? freeName(name, existing) : name }
+  },
+
+  saveImportedWorkspace: async (name, data, overwrite) => {
+    if (!isTauri) { get().showToast('保存はデスクトップアプリで利用できます'); return false }
+    try {
+      await saveWorkspace(name, JSON.stringify(data), !overwrite)
+      await get().refreshWorkspaces()
+      get().showToast(`ワークスペース「${name}」を読み込みました`)
+      return true
+    } catch (err) { get().showToast('保存失敗: ' + String(err).replace(/^EXISTS: /, '') + (String(err).includes('EXISTS:') ? '。もう一度「読み込む…」から選んでください' : ''))
+      return false
+    }
+  },
+
+  saveExport: async (stem, ext, content) => {
+    try {
+      const path = await exportFile(stem, ext, content)
+      if (isTauri) revealInExplorer(path).catch(() => { /* the toast still says where it is */ })
+      get().showToast(`「ダウンロード」に保存しました: ${path.split(/[\\/]/).pop()}`)
+    } catch (err) { get().showToast('書き出せません: ' + String(err)) }
+  },
+
+  openImport: async (file, only) => {
+    if (importBusy) { get().showToast('取り込みの途中です。終わってから選んでください'); return }
+    importBusy = true
+    try {
+      const fail = (error: string) => set({ importDraft: { fileName: file.name, error }, optTab: 'backup' })
+      if (file.size > BUNDLE_MAX_BYTES) { fail(`${Math.round(BUNDLE_MAX_BYTES / 1048576)} MB を超えるファイルは読み込めません`); return }
+      let text: string
+      try { text = await file.text() } catch (err) { fail('ファイルを読めません: ' + String(err)); return }
+      const s = get()
+      let existing = s.workspaces
+      if (isTauri) { try { existing = await listWorkspaces() } catch { /* keep the list already shown */ } }
+      const r = readBundle<FlexTheme>(text, {
+        actionIds: new Set(Object.keys(defaultBinds())),
+        advKeys: Object.keys(s.adv),
+        themeKeys: new Set([...Object.keys(THEMES), ...loadCustomThemes().map(t => t.key)]),
+        parseTheme: json => {
+          const t = parseFlexThemeFile(json)
+          return t.ok ? { ok: true, theme: t.theme } : { ok: false, errors: t.errors }
+        },
+        existingWorkspaces: existing,
+        binds: s.binds,
+        drives: driveRoots(s),
+        // Backups written before they carried `autoBackup` are known by name.
+        asBackup: /^before-import-.*\.flexexplorer\.json$/i.test(file.name),
+      })
+      if (!r.ok) { fail(r.error); return }
+      const present = presentSections(r.clean, r.restore)
+      if (!present.length) {
+        const why = Object.values(r.issues).flat() as string[]
+        fail(why.length ? `取り込めるものがありません。${why.slice(0, 3).join(' / ')}${why.length > 3 ? ` ほか ${why.length - 3}件` : ''}` : '取り込めるものがありません（中身が空です）')
+        return
+      }
+      if (only && !present.some(id => only.includes(id))) {
+        fail(`このファイルには${only.map(id => SECTIONS.find(x => x.id === id)!.label).join('・')}が入っていません`)
+        return
+      }
+      const { ok: _ok, ...preview } = r
+      set({ importDraft: { fileName: file.name, ...preview, pick: Object.fromEntries(present.map(id => [id, !only || only.includes(id)])) }, optTab: 'backup' })
+    } finally { importBusy = false }
+  },
+
+  setImportDraft: (d) => set({ importDraft: d }),
+
+  applyImport: async () => {
+    const d = get().importDraft
+    if (!d || d.error !== undefined || d.busy) return
+    if (importBusy) { get().showToast('取り込みの途中です。終わってから押してください'); return }
+    const ids = presentSections(d.clean, d.restore).filter(id => d.pick[id])
+    if (!ids.length) return
+    importBusy = true
+    set({ importDraft: { ...d, busy: true } })
+    const c = d.clean
+    const restore = d.restore
+    const notes: string[] = []
+    try {
+      // Everything as it is now, so the import can be taken back — from the
+      // toast, or later by reading the file in backups, which then puts the
+      // chosen sections back as they were (see `restore`).
+      let backup: Bundle, skipped: string[]
+      try {
+        ({ bundle: backup, skipped } = await buildBundle(get(), SECTIONS.map(x => x.id)))
+        backup.autoBackup = true
+        const text = JSON.stringify(backup, null, 2)
+        const mb = Math.round(BUNDLE_MAX_BYTES / 1048576)
+        const now = new Blob([text]).size
+        if (now > BUNDLE_MAX_BYTES) throw new Error(`今の状態が ${mb} MB を超え、読み戻せないため`)
+        // What this adds has to fit the next import's backup too. A backup
+        // being restored replaces rather than adds, and is itself in size.
+        const adds = { themes: c.themes, workspaces: c.workspaces?.map(w => w.data), notes: c.notes, places: c.places }
+        const more = new Blob([JSON.stringify(ids.map(id => (adds as Record<string, unknown>)[id] ?? null), null, 2)]).size
+        if (!restore && now + more > BUNDLE_MAX_BYTES) throw new Error(`取り込むと ${mb} MB を超え、次に取り込むときのバックアップを取れなくなるため`)
+        await writeBackup(text)
+      } catch (err) {
+        set({ importDraft: { ...d, busy: false } })
+        get().showToast('取り込み前の状態を保存できないため、中止しました: ' + String(err))
+        return
+      }
+      if (skipped.length) notes.push(`開けないワークスペース ${skipped.join('・')} はバックアップに入っていません`)
+      const u: ImportUndo = { backup: backup.sections, ids, themes: loadCustomThemes(), ws: { created: [], overwritten: [] }, notes: { created: [], overwritten: [] } }
+      // Each section on its own: one that fails (settings storage full, a
+      // locked file) doesn't keep the rest from being taken.
+      const part = async (label: string, run: () => unknown) => {
+        try { await run() } catch (err) { notes.push(`${label}は途中で失敗: ${String(err)}`) }
+      }
+      const own = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k)
+
+      // Themes first: the appearance section may pick one of them.
+      if (ids.includes('themes')) {
+        await part('自作テーマ', () => {
+          const keep = new Set((c.themes ?? []).map(t => t.key))
+          if (restore) for (const t of loadCustomThemes()) if (!keep.has(t.key)) deleteCustomTheme(t.key)
+          for (const t of c.themes ?? []) saveCustomTheme(t)
+          // The theme in use may be one just replaced (or removed).
+          if (restore || keep.has(get().theme)) applyTheme(get().theme, document.documentElement)
+        })
+      }
+      if (ids.includes('appearance') && c.appearance) {
+        const a = c.appearance
+        await part('外観', () => {
+          set(st => ({ opt: { ...st.opt, ...a.opt } }))
+          // A theme from the file only exists if 自作テーマ was taken as well.
+          if (a.theme && (a.theme in THEMES || loadCustomThemes().some(t => t.key === a.theme))) get().setOptTheme(a.theme)
+          else if (a.theme) notes.push(`テーマ「${a.theme}」は自作テーマを取り込まなかったので今のまま`)
+        })
+      }
+      if (ids.includes('behavior') && c.behavior) {
+        const b = c.behavior
+        await part('動作・世代ファイル', () => set(st => ({ adv: { ...st.adv, ...b.adv }, genHighlight: b.genHighlight ?? st.genHighlight, genRules: b.genRules ?? st.genRules })))
+      }
+      if (ids.includes('places') && c.places) {
+        const p = c.places
+        await part('ブックマーク・ピン', () => set(st => {
+          if (restore) return { bookmarks: p.bookmarks, pins: p.pins }
+          const have = new Set(st.bookmarks.map(b => b.path.toLowerCase()))
+          return { bookmarks: [...st.bookmarks, ...p.bookmarks.filter(b => !have.has(b.path.toLowerCase()))], pins: [...new Set([...st.pins, ...p.pins])] }
+        }))
+      }
+      if (ids.includes('shortcuts') && c.shortcuts) {
+        const k = c.shortcuts
+        await part('ショートカット', async () => {
+          // Against the bindings as they are now, not as the preview saw them:
+          // a key the file gives one action is taken from whatever else has it.
+          set(st => {
+            const taken = new Set(Object.values(k.binds).filter(Boolean))
+            const freed = Object.entries(st.binds).filter(([id, combo]) => !(id in k.binds) && taken.has(combo)).map(([id]) => [id, ''])
+            return { binds: { ...st.binds, ...Object.fromEntries(freed), ...k.binds } }
+          })
+          if (k.quickOpenHotkey) {
+            await get().setQuickOpenHotkey(k.quickOpenHotkey)
+            if (get().quickOpenHotkey !== k.quickOpenHotkey) notes.push(`ホットキー ${k.quickOpenHotkey} は登録できず元のまま`)
+          }
+        })
+      }
+      if (ids.includes('workspaces') && c.workspaces) {
+        if (!isTauri) notes.push('ワークスペースはデスクトップアプリでのみ取り込めます')
+        else {
+          await part('ワークスペース', async () => {
+            const backedUp = backup.sections.workspaces ?? {}
+            // Names as they are on disk now: the preview's list can be stale
+            // (another window may have saved one since).
+            const onDisk = await listWorkspaces()
+            const taken = [...onDisk]
+            const saved = new Map<string, string>()
+            try {
+              for (const w of c.workspaces!) {
+                if (w.choice === 'skip') continue
+                try {
+                  const existing = onDisk.find(x => x.toLowerCase() === w.name.toLowerCase())
+                  // Only an explicit 上書き replaces — and only a file the
+                  // backup holds, so 元に戻す can put it back. One that
+                  // appeared since the preview is saved under another name.
+                  const over = !!existing && w.choice === 'overwrite' && own(backedUp, existing)
+                  let target = over ? existing! : freeName(w.choice === 'rename' ? w.altName : w.name, taken)
+                  for (let tries = 0; ; tries++) {
+                    try { await saveWorkspace(target, JSON.stringify(w.data), !over); break }
+                    catch (err) {
+                      if (over || !String(err).includes('EXISTS:') || tries > 50) throw err
+                      taken.push(target)
+                      target = freeName(w.name, taken)
+                    }
+                  }
+                  if (existing && w.choice === 'overwrite' && !over) notes.push(`今の「${existing}」は開けないファイルなので、「${target}」として保存`)
+                  ;(over ? u.ws.overwritten : u.ws.created).push(target)
+                  taken.push(target)
+                  saved.set(w.name, target)
+                } catch (err) { notes.push(`ワークスペース「${w.name}」を保存できません: ${String(err)}`) }
+              }
+              const def = c.defaultWorkspace && saved.get(c.defaultWorkspace)
+              if (def) set({ defaultWorkspace: def })
+              else if (restore && !c.defaultWorkspace) set({ defaultWorkspace: null })
+            } finally { await get().refreshWorkspaces() }
+          })
+        }
+      }
+      if (ids.includes('notes') && c.notes) {
+        const incoming = c.notes
+        await part('付箋', async () => {
+          const before = backup.sections.notes ?? {}
+          // A backup puts back exactly what it holds.
+          const del = restore ? Object.keys(before).filter(k => !own(incoming, k)) : []
+          // All in one write: one notes_set each rewrote notes.json every time.
+          const giveBack = holdNoteSaves([...Object.keys(incoming), ...del])
+          try { await notesApply(incoming, del) } catch (err) { giveBack(); throw err }
+          // Recorded and shown only once it is saved, so memory and disk agree.
+          for (const k of Object.keys(incoming)) (own(before, k) ? u.notes.overwritten : u.notes.created).push(k)
+          u.notes.overwritten.push(...del)
+          set(st => { const n = { ...st.notes, ...incoming }; for (const k of del) delete n[k]; return { notes: n } })
+        })
+      }
+      lastImport = u
+      set({ importDraft: null })
+      get().showToast(`取り込みました${notes.length ? '（' + notes.join('、') + '）' : ''}`, { label: '↩ 元に戻す', kind: 'import' })
+    } finally { importBusy = false }
+  },
 
   openPalette: () => set({ palette: { open: true, q: '', sel: 0 }, modal: null, ctx: null, goto: { ...get().goto, open: false } }),
   closePalette: () => set(s => ({ palette: { ...s.palette, open: false }, capturing: null })),
@@ -2544,15 +3039,19 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   showToast: (msg, undo) => {
     if (toastTimer) clearTimeout(toastTimer)
     set({ toast: msg, undo: undo || null })
-    toastTimer = setTimeout(() => set({ toast: null, undo: null }), undo ? 5000 : 2200)
+    // An import changes a lot at once, so its undo stays offered longer.
+    toastTimer = setTimeout(() => set({ toast: null, undo: null }), undo ? (undo.kind === 'import' ? 12000 : 5000) : 2200)
   },
   doUndo: () => {
     const u = get().undo
     if (!u) return
+    // The undo stays offered: it can run once the import in progress ends.
+    if (u.kind === 'import' && importBusy) { get().showToast('取り込みの途中です。終わってから戻してください', u); return }
     set({ undo: null })
     // Previously this only rewrote the toast text and restored nothing.
     if (u.kind === 'group') get().reopenClosedLayoutGroup()
     if (u.kind === 'report') get().openTransferReport()
+    if (u.kind === 'import') void undoImport()
   },
   clearToast: () => set({ toast: null, undo: null }),
 }), {
