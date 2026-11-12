@@ -5,7 +5,7 @@ import { useStore } from '../store/useStore'
 import { iconOf, previewText, fmt } from '../utils/fileUtils'
 import {
   isTauri, isRealPath, readTextPreview, readXlsxPreview, openPath,
-  shellIcon, peekIcon, assetUrl, joinPath, splitPath,
+  shellIcon, peekIcon, assetUrl, joinPath, splitPath, copyText,
 } from '../fs/bridge'
 import type { FileEntry, PaneTab } from '../types'
 
@@ -66,18 +66,23 @@ export default function Inspector() {
   useEffect(() => {
     setText(''); setAsset('')
     if (!file || file.folder) return
+    // Closed panel: nothing to show, so don't parse a workbook per arrow key.
+    if (!inspectorOpen) return
     if (!realPath) { const t = previewText(file); if (t) setText(t); return }
     let cancelled = false
-    if (kind === 'image' || kind === 'pdf') {
-      assetUrl(abs).then(u => { if (!cancelled) setAsset(u) })
-    } else if (kind === 'sheet') {
-      readXlsxPreview(segs).then(t => { if (!cancelled) setText(t) }).catch(() => { if (!cancelled) setText('（プレビューを読み込めませんでした）') })
-    } else if (kind === 'text' || kind === 'markdown') {
-      readTextPreview(segs).then(t => { if (!cancelled) setText(t) }).catch(() => { if (!cancelled) setText('') })
-    }
-    return () => { cancelled = true }
+    // Wait a beat so holding an arrow key reads only the row it stops on.
+    const timer = setTimeout(() => {
+      if (kind === 'image' || kind === 'pdf') {
+        assetUrl(abs).then(u => { if (!cancelled) setAsset(u) })
+      } else if (kind === 'sheet') {
+        readXlsxPreview(segs).then(t => { if (!cancelled) setText(t) }).catch(() => { if (!cancelled) setText('（プレビューを読み込めませんでした）') })
+      } else if (kind === 'text' || kind === 'markdown') {
+        readTextPreview(segs).then(t => { if (!cancelled) setText(t) }).catch(() => { if (!cancelled) setText('') })
+      }
+    }, 150)
+    return () => { cancelled = true; clearTimeout(timer) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [abs, kind, realPath])
+  }, [abs, kind, realPath, inspectorOpen])
 
   // Native shell icon (large) for the header.
   const [iconUrl, setIconUrl] = useState<string | null>(file ? peekIcon(file.name, !!file.folder, true) : null)
@@ -156,6 +161,15 @@ export default function Inspector() {
               ? <div
                   style={{ fontSize: 12.5, lineHeight: 1.65, color: 'var(--text)', background: 'var(--bg-page)', border: '1px solid var(--border)', borderRadius: 8, padding: '12px 14px', maxHeight: 420, overflow: 'auto', wordBreak: 'break-word' }}
                   className="md-preview"
+                  // A followed link would replace the whole app with that page,
+                  // and the frameless window has no way back.
+                  onClick={e => {
+                    const a = (e.target as HTMLElement).closest('a')
+                    if (!a) return
+                    e.preventDefault()
+                    const href = a.getAttribute('href') || ''
+                    void copyText(href).then(ok => showToast(ok ? 'リンクをコピーしました: ' + href : 'リンクは開けません'))
+                  }}
                   dangerouslySetInnerHTML={{ __html: mdHtml }}
                 />
               : <PreviewLoading />

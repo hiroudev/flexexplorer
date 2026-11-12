@@ -161,6 +161,15 @@ function fitFracs(fr: number[] | undefined, n: number): number[] {
 const MAX_ROWS = 3
 
 /** Create a new single-tab pane showing the same folder as `src`. */
+/** The pane "別ペインで開く" targets: the next one round, or the active pane
+ * itself when it is the only one — so the action never silently does nothing. */
+function otherPane(s: { activePane: number; panes: Pane[] }): number {
+  return (s.activePane + 1) % s.panes.length
+}
+
+/** The note the last 🗑 removed, kept so the toast's undo can put it back. */
+let removedNote: { key: string; note: FolderNote } | null = null
+
 function makePaneFrom(src: PaneTab): Pane {
   return {
     active: 0,
@@ -1187,7 +1196,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   },
 
   navPath: (path, other) => {
-    const pi = other ? (get().activePane === 0 ? 1 : 0) : get().activePane
+    const pi = other ? otherPane(get()) : get().activePane
     void get().revealPath(pi, path)
   },
 
@@ -1880,10 +1889,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   },
 
   newTab: (pi) => {
-    const home: FileEntry[] = [F('デスクトップ', { folder: true }), F('ダウンロード', { folder: true }), F('ドキュメント', { folder: true }), F('ピクチャ', { folder: true })]
+    // A new tab opens on the folder the current tab shows (it used to be a
+    // mock "PC" tab whose made-up folders looked real in the desktop app).
     set(s => {
       const panes = clonePanes(s.panes); const p = panes[pi]
-      p.tabs.push({ id: 'new' + Math.random().toString(36).slice(2), title: 'PC', path: ['PC'], files: home, focus: 0, sel: [0], columns: defCols() })
+      p.tabs.push({ ...makePaneFrom(p.tabs[p.active]).tabs[0], pinned: false })
       p.active = p.tabs.length - 1
       return { panes, activePane: pi }
     })
@@ -2025,7 +2035,13 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     pushClosedLayoutGroup(closing)
     const wasActive = i === s.activeLayout
     layouts = layouts.filter((_, gi) => gi !== i)
-    const activeLayout = i < s.activeLayout ? s.activeLayout - 1 : Math.min(i, layouts.length - 1)
+    if (!wasActive) {
+      // A group in the background: the one on show stays exactly as it is.
+      set({ layouts, activeLayout: i < s.activeLayout ? s.activeLayout - 1 : s.activeLayout })
+      get().showToast(`グループ「${closing.name}」を閉じました`, { label: closing.name, kind: 'group' })
+      return
+    }
+    const activeLayout = Math.min(i, layouts.length - 1)
     const target = layouts[activeLayout]
     set({
       layouts,
@@ -2034,7 +2050,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
       gridCols: target.gridCols,
       activePane: Math.min(target.activePane, Math.max(0, target.panes.length - 1)),
     })
-    if (wasActive && isTauri) {
+    if (isTauri) {
       const cur = get().panes
       cur.forEach(p => p.tabs.forEach(t => {
         if (!isRealPath(t.path)) return
@@ -2166,9 +2182,17 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
   openQuickOpen: () => set({ quickOpen: { open: true }, ctx: null, modal: null }),
   closeQuickOpen: () => set({ quickOpen: { open: false } }),
   submitQuickOpen: (path) => {
-    const v = path.trim()
+    const v = parsePastedPath(path)
     set({ quickOpen: { open: false } })
-    if (v) get().openInTmpGroup(v)
+    if (!v) return
+    if (!isTauri) { get().openInTmpGroup(v); return }
+    // Resolve first: a path that isn't there must not leave an empty pane
+    // behind, and a file's path opens its folder with the file selected.
+    void resolveTarget(v).then(async dir => {
+      if (!dir) { get().showToast('見つかりません: ' + v); return }
+      get().openInTmpGroup(dir)
+      await get().revealPath(get().activePane, v)
+    }).catch(err => get().showToast('開けません: ' + String(err)))
   },
 
   renameLayoutGroup: (i, name) => set(s => {
@@ -2618,9 +2642,11 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     // Cancel an edit still waiting to be saved: if it fired after the delete it
     // would write the note straight back (notes_set), resurrecting it.
     cancelNoteSave(key)
+    const removed = get().notes[key]
     set(s => { const n = { ...s.notes }; delete n[key]; return { notes: n, ctx: null } })
     void notesDelete(key).catch(noteSaveFailed)
-    get().showToast('付箋メモを削除しました')
+    if (removed) removedNote = { key, note: removed }
+    get().showToast('付箋メモを削除しました', removed ? { label: '↩ 元に戻す', kind: 'note' } : undefined)
   },
 
   loadExtTools: async () => {
@@ -3029,7 +3055,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     set(s => ({ goto: { ...s.goto, open: false } }))
     const segs = splitPath(path)
     if (isTauri && isRealPath(segs)) {
-      const pi = other ? (get().activePane === 0 ? 1 : 0) : get().activePane
+      const pi = other ? otherPane(get()) : get().activePane
       void get().revealPath(pi, path)
       return
     }
@@ -3040,7 +3066,9 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (toastTimer) clearTimeout(toastTimer)
     set({ toast: msg, undo: undo || null })
     // An import changes a lot at once, so its undo stays offered longer.
-    toastTimer = setTimeout(() => set({ toast: null, undo: null }), undo ? (undo.kind === 'import' ? 12000 : 5000) : 2200)
+    // ponytail: failures are spotted by wording, since callers pass no severity; add a kind argument if a failure toast slips through.
+    const failed = /失敗|できません|開けません|見つかりません|読めません|読み取れません|エラー/.test(msg)
+    toastTimer = setTimeout(() => set({ toast: null, undo: null }), undo ? (undo.kind === 'import' ? 12000 : 5000) : failed ? 6000 : 2200)
   },
   doUndo: () => {
     const u = get().undo
@@ -3052,6 +3080,12 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     if (u.kind === 'group') get().reopenClosedLayoutGroup()
     if (u.kind === 'report') get().openTransferReport()
     if (u.kind === 'import') void undoImport()
+    if (u.kind === 'note' && removedNote) {
+      const { key, note } = removedNote
+      removedNote = null
+      set(s => ({ notes: { ...s.notes, [key]: note } }))
+      void notesSet(key, note).catch(noteSaveFailed)
+    }
   },
   clearToast: () => set({ toast: null, undo: null }),
 }), {

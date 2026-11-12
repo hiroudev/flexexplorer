@@ -76,7 +76,10 @@ export default function GoToOverlay() {
       if (cur) gotoInput(cur.path)
     }
     if (e.key === 'Enter') {
-      const path = goto.q.trim() || (flat[sel]?.path || '')
+      // A typed path wins only while no candidate has been picked: once the
+      // user arrows down to one, or typed a plain word, Enter takes the candidate.
+      const typed = goto.q.trim()
+      const path = (sel === 0 && /[\\/:]/.test(typed)) ? typed : (flat[sel]?.path || typed)
       if (path) navTo(path, e.shiftKey)
     }
   }

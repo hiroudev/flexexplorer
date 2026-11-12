@@ -49,7 +49,8 @@ export const ACTIONS: Record<string, (st: Store) => void> = {
   },
   'nav.open': st => {
     const t = st.panes[st.activePane].tabs[st.panes[st.activePane].active]
-    st.openFile(st.activePane, t.focus)
+    // A row the filter has hidden must not open on Enter.
+    if (visibleSelection({ ...t, sel: [t.focus] }, st).length) st.openFile(st.activePane, t.focus)
   },
   'nav.newtab': st => st.newTab(st.activePane),
   'nav.closetab': st => st.closeTab(st.activePane, st.panes[st.activePane].active),

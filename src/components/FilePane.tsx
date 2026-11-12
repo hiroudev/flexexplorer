@@ -202,6 +202,7 @@ function FileRow({ file, idx, pi, cols, gridCols, isActive, selected, focused, t
     const wasSole = selected && soleSelected && isActive && !e.ctrlKey && !e.shiftKey && !renaming
     selectFile(pi, idx, e)
     cancelPendingRename()
+    if (singleClickOpen && !e.ctrlKey && !e.shiftKey && !e.metaKey && !renaming) { openFile(pi, idx); return }
     if (wasSole && !singleClickOpen) {
       renameTimer.current = setTimeout(() => { renameTimer.current = null; startRename(pi, idx) }, 500)
     }
@@ -411,7 +412,6 @@ function TabContextMenu({ pi, ti, x, y, pinned, onClose }: { pi: number; ti: num
 /** Right-click menu for the address bar (edit / copy / jump to a pasted path). */
 function AddressContextMenu({ pi, path, x, y, onClose }: { pi: number; path: string[]; x: number; y: number; onClose: () => void }) {
   const startAddressEdit = useStore(s => s.startAddressEdit)
-  const navigate = useStore(s => s.navigate)
   const showToast = useStore(s => s.showToast)
   const ref = useRef<HTMLDivElement>(null)
 
@@ -440,8 +440,7 @@ function AddressContextMenu({ pi, path, x, y, onClose }: { pi: number; path: str
       <Item label="コピー済みのパスへ移動" run={() => {
         void navigator.clipboard.readText()
           .then(t => {
-            const v = t.trim().replace(/^"|"$/g, '')
-            if (v) void navigate(pi, splitPath(v))
+            if (t.trim()) void useStore.getState().revealPath(pi, t)
             else showToast('クリップボードが空です')
           })
           .catch(() => showToast('クリップボードを読み取れません'))
@@ -553,7 +552,6 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
   const addressEdit = useStore(s => s.addressEdit)
   const startAddressEdit = useStore(s => s.startAddressEdit)
   const endAddressEdit = useStore(s => s.endAddressEdit)
-  const navigate = useStore(s => s.navigate)
   const openCtxBg = useStore(s => s.openCtxBg)
   const dropOnFolder = useStore(s => s.dropOnFolder)
   const renaming = useStore(s => s.renaming)
@@ -602,6 +600,7 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
   const gridCols = gridTemplate(cols)
   const q = searchMode === 'filter' ? search.trim().toLowerCase() : ''
   const vis = visibleIndices(tab, q, showHidden)
+  const selSet = new Set(tab.sel)
   // Absolute paths of the visible selection, handed to each row so a drag can
   // carry the whole selection rather than just the row that started it. Rows
   // hidden by the filter or the hidden-files setting stay out, as they do for
@@ -803,7 +802,7 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
           {addressEdit === pi ? (
             <AddressBarInput
               defaultValue={joinPath(tab.path)}
-              onSubmit={v => { if (v) void navigate(pi, splitPath(v)) }}
+              onSubmit={v => { if (v) void useStore.getState().revealPath(pi, v) }}
               onDone={endAddressEdit}
             />
           ) : (
@@ -907,7 +906,7 @@ export default function FilePane({ pane, pi, spanCols }: { pane: Pane; pi: numbe
                 cols={cols}
                 gridCols={gridCols}
                 isActive={isActive}
-                selected={tab.sel.includes(idx)}
+                selected={selSet.has(idx)}
                 focused={tab.focus === idx}
                 tabIdx={row}
                 renaming={renamingIdx === idx}

@@ -193,7 +193,7 @@ export interface AppState {
   toast: string | null
   /** Offered by the toast's ↩ button. Only actions that can genuinely be
    * undone set this — a label alone would promise something nothing delivers. */
-  undo: { label: string; kind: 'group' | 'report' | 'import' } | null
+  undo: { label: string; kind: 'group' | 'report' | 'import' | 'note' } | null
   capturing: string | null
   binds: Record<string, string>
   rename: { rules: RenameRule[]; addOpen: boolean }
