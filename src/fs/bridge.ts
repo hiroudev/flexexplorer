@@ -354,6 +354,18 @@ export async function startTransfer(
   await invoke('start_transfer', { id, paths, destDir, mode, conflict })
 }
 
+/** Files on the OS clipboard (CF_HDROP). `paths` is empty when it holds none. */
+export interface OsClipFiles { paths: string[]; cut: boolean; seq: number }
+
+export async function clipboardReadFiles(): Promise<OsClipFiles> {
+  return invoke<OsClipFiles>('clipboard_read_files')
+}
+
+/** Puts files on the OS clipboard (an empty list empties it); resolves to its sequence number. */
+export async function clipboardWriteFiles(paths: string[], cut: boolean): Promise<number> {
+  return invoke<number>('clipboard_write_files', { paths, cut })
+}
+
 export async function cancelTransfer(id: string): Promise<void> {
   await invoke('cancel_transfer', { id })
 }

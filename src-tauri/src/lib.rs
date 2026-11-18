@@ -1,4 +1,5 @@
 mod backup;
+mod clipboard;
 mod external;
 mod fs;
 mod icons;
@@ -51,6 +52,8 @@ pub fn run() {
             transfer::plan_transfer,
             transfer::start_transfer,
             transfer::cancel_transfer,
+            clipboard::clipboard_read_files,
+            clipboard::clipboard_write_files,
             fs::rename_path,
             fs::copy_entries,
             fs::move_entries,

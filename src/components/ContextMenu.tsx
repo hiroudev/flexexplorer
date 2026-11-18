@@ -132,7 +132,7 @@ export default function ContextMenu() {
     // native menu, without going through "Windows のメニューを表示…".
     items.push({ icon: '✚', iconColor: 'var(--accent)', label: '新規', key: '', arrow: true, subId: 'new', onClick: () => openSub('new') })
     items.push({ divider: true })
-    items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); if (clip) void paste(tab.path) } })
+    items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); void paste(tab.path) } })
     items.push({ divider: true })
     items.push({ icon: '☑', iconColor: 'var(--text-muted)', label: 'すべて選択', key: 'Ctrl+A', onClick: () => { closeCtx(); selectAll() } })
     items.push({ icon: '☒', iconColor: 'var(--text-muted)', label: '選択を反転', key: 'Ctrl+Shift+A', onClick: () => { closeCtx(); invertSelection() } })
@@ -171,7 +171,7 @@ export default function ContextMenu() {
     items.push({ divider: true })
     items.push({ icon: '✂', iconColor: 'var(--text-muted)', label: '切り取り', key: 'Ctrl+X', onClick: () => { closeCtx(); cutToClip(targets) } })
     items.push({ icon: '⎘', iconColor: 'var(--text-muted)', label: 'コピー', key: 'Ctrl+C', onClick: () => { closeCtx(); copyToClip(targets) } })
-    items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); if (clip) void paste(tab.path) } })
+    items.push({ icon: '⎙', iconColor: clip ? 'var(--accent)' : 'var(--text-faint)', label: clip ? `貼り付け (${clip.paths.length})` : '貼り付け', key: 'Ctrl+V', onClick: () => { closeCtx(); void paste(tab.path) } })
     items.push({ icon: '⧉', iconColor: 'var(--text-muted)', label: 'パスをコピー', key: 'Ctrl+Shift+C', onClick: () => { closeCtx(); void copyPathToClipboard(targets) } })
     if (!multi && f && !f.folder) {
       items.push({ icon: '🕓', iconColor: 'var(--text-muted)', label: 'コピーを日付付きで保存', key: '', onClick: () => { closeCtx(); void duplicateSelectedAsDatedCopy(target) } })

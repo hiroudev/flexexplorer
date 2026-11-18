@@ -14,6 +14,7 @@ import { writeQueue } from '../utils/writeQueue'
 import {
   isTauri, isRealPath, listDir, listDrives, homeDir, launchPath, openPath, splitPath, joinPath, renamePath,
   planTransfer, startTransfer, cancelTransfer as bridgeCancelTransfer, siblingFolders, resolveTarget,
+  clipboardReadFiles, clipboardWriteFiles,
   deleteEntries, createFolder, createNewItem as bridgeCreateNewItem, searchDir, copyText,
   shellVerb, showShellContextMenu, createShortcut, resolveShortcut, createPathShortcutText, revealInExplorer, openInTerminal, openInVscode, duplicateAsDatedCopy,
   saveWorkspace, listWorkspaces, loadWorkspace, deleteWorkspace, workspaceDir, exportFile, exportFolder, writeBackup,
@@ -728,6 +729,33 @@ let transferTargets: { srcPi: number; dirs: Set<string>; paths: string[]; dest: 
 // A transfer is being measured (see beginTransfer).
 let planningTransfer = false
 
+// OS clipboard (CF_HDROP — Explorer, Everything, …). `osClipSeq` is the
+// clipboard's sequence number right after our own copy/cut: while it still
+// matches, the in-app `clip` is what Ctrl+V pastes; once it differs, the OS
+// clipboard wins. `osClipWriting` lets a quick Ctrl+C → Ctrl+V see that number.
+let osClipSeq: number | null = null
+let osClipWriting: Promise<void> = Promise.resolve()
+// A paste that moves a cut: the sequence number when it was pasted, so the
+// cut can be emptied off the OS clipboard once the move completes.
+let pasteCut: { paths: string[]; seq: number } | null = null
+
+function writeOsClip(paths: string[], cut: boolean) {
+  if (!isTauri) return
+  osClipWriting = clipboardWriteFiles(paths, cut).then(
+    seq => { osClipSeq = seq },
+    // Not written (clipboard busy): treat what is there now as "ours", so the
+    // in-app clip still pastes until something else is copied.
+    () => clipboardReadFiles().then(r => { osClipSeq = r.seq }, () => {}),
+  )
+}
+
+/** Empties the OS clipboard if it still holds what was pasted at `seq`. */
+async function clearOsClipIf(seq: number) {
+  try {
+    if ((await clipboardReadFiles()).seq === seq) osClipSeq = await clipboardWriteFiles([], false)
+  } catch { /* busy — leave it */ }
+}
+
 // Pane-grid track weights per layout group id. Kept alongside the store rather
 // than inside LayoutGroup so every place that stashes/restores a group doesn't
 // have to remember to carry them; a group with no entry falls back to equal
@@ -1321,6 +1349,7 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const paths = given ?? selectedAbs(activeTab(get()), get())
     if (!paths.length) return
     set({ clip: { mode: 'copy', paths } })
+    writeOsClip(paths, false)
     get().showToast(paths.length + ' 件をコピー')
   },
 
@@ -1328,20 +1357,36 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const paths = given ?? selectedAbs(activeTab(get()), get())
     if (!paths.length) return
     set({ clip: { mode: 'cut', paths } })
+    writeOsClip(paths, true)
     get().showToast(paths.length + ' 件を切り取り')
   },
 
   paste: async (dest) => {
     const s = get()
-    const clip = s.clip
-    if (!clip || !clip.paths.length) return
     const to = dest ?? activeTab(s).path
     if (!isTauri || !isRealPath(to)) return
+    let src = s.clip
+    let seq: number | null = null
+    try {
+      await osClipWriting
+      const os = await clipboardReadFiles()
+      seq = os.seq
+      if (os.seq !== osClipSeq) {
+        // Something else was copied since our own copy/cut. It wins even when
+        // it isn't files (text, say): pasting our older clip would be a guess.
+        src = os.paths.length ? { mode: os.cut ? 'cut' : 'copy', paths: os.paths } : null
+        osClipSeq = os.seq
+        set({ clip: null })
+      }
+    } catch { /* clipboard busy: fall back to the in-app clip */ }
+    if (!src || !src.paths.length) return
+    const mode = src.mode === 'copy' ? 'copy' : 'move'
+    pasteCut = mode === 'move' && seq !== null ? { paths: src.paths, seq } : null
     // A cut is only spent once the move actually completes (onTransferDone).
     // Dropping it here lost it whenever the conflict dialog was cancelled or
     // the transfer failed to start — the files were still in place, but the
     // user had to cut them again.
-    await get().beginTransfer(clip.paths, to, clip.mode === 'copy' ? 'copy' : 'move', s.activePane)
+    await get().beginTransfer(src.paths, to, mode, s.activePane)
   },
 
   /** Entry point for every copy/move: works out what it involves, asks about
@@ -1417,6 +1462,8 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
     const mode = running.mode
     const targets = transferTargets
     transferTargets = null
+    const pc = pasteCut
+    pasteCut = null
     const report: TransferReport = {
       mode, dest: targets?.dest ?? '', at: nowStamp(), cancelled: d.cancelled,
       links: d.links, items: d.items, linkPaths: d.linkPaths,
@@ -1447,6 +1494,14 @@ export const useStore = create<AppState & Actions>()(persist((set, get) => ({
         && clip.paths.length === targets.paths.length
         && clip.paths.every((p, i) => p === targets.paths[i])) {
       set({ clip: null })
+    }
+    // Same for a cut on the OS clipboard (ours or Explorer's), if nothing was
+    // copied since the paste. A partial move (skips) leaves it alone: the
+    // skipped items are still there to be pasted again.
+    if (mode === 'move' && !d.skipped && pc && targets
+        && pc.paths.length === targets.paths.length
+        && pc.paths.every((p, i) => p === targets.paths[i])) {
+      void clearOsClipIf(pc.seq)
     }
     const skipped = d.skipped ? ` (${d.skipped} 件スキップ)` : ''
     // Said out loud: a copy that quietly leaves things out reads as complete.
